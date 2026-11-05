@@ -8661,10 +8661,15 @@ function drawInstanceCanvas(followPass: boolean): void {
     || (projectionType === 'worldMapArea' && (profile || art.worldMapBounds)))
     ? art
     : null;
+  // A single-image artwork (the WMO quad art beside a dungeon-floors paper
+  // export) carries no floors: the flat view shows its whole map at once, so
+  // the selected floor applies to no image, bounds, or unit of it. In 3D the
+  // scene's selected floor still frames and filters the scene (below).
+  const shownFloor = art?.projection?.type === 'dungeonFloors' ? floor : null;
   // The flat view's map of that floor, if it has one.
-  const mapFloor = floor ? asset?.floors?.find((candidate) => candidate.id === floor.id) : undefined;
-  const assetImage = floor ? asset?.floorImages.get(floor.id) : asset?.image;
-  const bounds = floor?.bounds ?? asset?.worldMapBounds ?? getStableInstanceBounds(session);
+  const mapFloor = shownFloor ? asset?.floors?.find((candidate) => candidate.id === shownFloor.id) : undefined;
+  const assetImage = shownFloor ? asset?.floorImages.get(shownFloor.id) : asset?.image;
+  const bounds = shownFloor?.bounds ?? asset?.worldMapBounds ?? getStableInstanceBounds(session);
   const assetWidth = mapFloor?.width ?? asset?.width;
   const assetHeight = mapFloor?.height ?? asset?.height;
   const aspectRatio = assetWidth && assetHeight
@@ -8672,14 +8677,15 @@ function drawInstanceCanvas(followPass: boolean): void {
     : profile?.aspectRatio;
   // Units on the floor shown; in 3D also those on no floor at all, as the
   // scene draws what the floors don't cover (the flat view has only the
-  // floor's artwork).
+  // floor's artwork, or the whole map of a floorless artwork).
   const sceneFloors = isInstanceSceneShowing(session.mapId);
+  const filterFloor = sceneFloors ? floor : shownFloor;
   const onShownFloor = (unit: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z' | 'wmoGroupId'>): boolean => {
-    if (!floor) return true;
+    if (!filterFloor) return true;
     const at = getParticipantDungeonFloor(unit, floors);
-    return at ? at.id === floor.id : sceneFloors;
+    return at ? at.id === filterFloor.id : sceneFloors;
   };
-  const visiblePlayers = floor ? session.players.filter(onShownFloor) : session.players;
+  const visiblePlayers = filterFloor ? session.players.filter(onShownFloor) : session.players;
   const live = instanceLiveStream?.key === session.key;
   const liveNow = performance.now();
   const creatures = live && instanceMobsMode !== 'off'
