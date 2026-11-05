@@ -13,7 +13,7 @@ import {
 import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle, POWER_COLORS } from './instance-scene/nameplates';
 import { ClientIcons } from './utils/client-icons';
 import { SpellNames } from './utils/spell-names';
-import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveDebuffStore, LiveGameObjectStore, LiveMarkerStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
+import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveDebuffStore, LiveGameObjectStore, LiveMarkerStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, LiveTransportBuffer, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
@@ -23,7 +23,7 @@ import { sceneExportNotice, sceneExportStatus } from '../../src/scene-export-ver
 import { formatBattlegroundOutcome } from '../../src/session-outcome';
 import { AppState, createInitialState, PlayerInfo } from './types/state';
 import type { CreatureInfo, StreamBotDecision, StreamCreatureSample, StreamStatus } from '../../src/types/api';
-import type { ConnectionProfile, DbConfig, SoapConfig, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/api';
+import type { ConnectionProfile, DbConfig, SoapConfig, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapTransportPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/api';
 import { bindInventoryTableTooltips, formatInventoryLocation, ITEM_QUALITY_COLOR } from './inventory/wow-item-tooltip';
 
 // ── Application State ────────────────────────────────────────────────────
@@ -5414,6 +5414,12 @@ const $mapIconScale = $<HTMLInputElement>('map-icon-scale');
 const $mapIconScaleValue = $<HTMLOutputElement>('map-icon-scale-value');
 
 let mapAllPlayers: MapPlayerPosition[] = [];
+let mapAllTransports: MapTransportPosition[] = [];
+// Recent z samples per map:entry, for the transports' up/down arrows.
+const mapTransportZHistory = new Map<string, Array<{ z: number; at: number }>>();
+const MAP_TRANSPORT_Z_WINDOW_MS = 4000;
+// Vertical travel in yards within the window before an arrow is shown.
+const MAP_TRANSPORT_Z_TREND_MIN = 0.3;
 let mapPreviousPositions = new Map<string, Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>>();
 let mapMovingPlayers = new Set<string>();
 let mapMovementStartedAt = 0;
@@ -5762,6 +5768,47 @@ function getMapFilteredPlayers(): MapPlayerPosition[] {
   });
 }
 
+function getMapFilteredTransports(): MapTransportPosition[] {
+  const continent = state.mapSelectedContinent;
+  return mapAllTransports.filter((t) => t.map === continent);
+}
+
+// Records this snapshot's z per transport and returns -1/0/1 when the z
+// trend over the recent samples says descending, still, or ascending.
+function recordTransportZSamples(): void {
+  const now = performance.now();
+  const seen = new Set<string>();
+  for (const transport of mapAllTransports) {
+    const key = `${transport.map}:${transport.entry}`;
+    seen.add(key);
+    let samples = mapTransportZHistory.get(key);
+    if (!samples) {
+      samples = [];
+      mapTransportZHistory.set(key, samples);
+    }
+    samples.push({ z: transport.position_z, at: now });
+  }
+  for (const [key, samples] of mapTransportZHistory) {
+    if (!seen.has(key)) {
+      mapTransportZHistory.delete(key);
+      continue;
+    }
+    while (samples.length > 1 && now - samples[0].at > MAP_TRANSPORT_Z_WINDOW_MS) samples.shift();
+  }
+}
+
+function getTransportZTrend(map: number, entry: number): -1 | 0 | 1 {
+  const samples = mapTransportZHistory.get(`${map}:${entry}`);
+  if (!samples || samples.length < 2) return 0;
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  if (last.at - first.at < 1000) return 0;
+  const dz = last.z - first.z;
+  if (dz > MAP_TRANSPORT_Z_TREND_MIN) return 1;
+  if (dz < -MAP_TRANSPORT_Z_TREND_MIN) return -1;
+  return 0;
+}
+
 // ── DB connection ──────────────────────────────────────────────────────────
 async function connectMapDb(): Promise<void> {
   const host = $<HTMLInputElement>('map-db-host')?.value.trim() || '127.0.0.1';
@@ -5798,6 +5845,8 @@ async function disconnectMapDb(): Promise<void> {
   stopMapAutoRefresh();
   if ($mapAutoRefresh) $mapAutoRefresh.checked = false;
   mapAllPlayers = [];
+  mapAllTransports = [];
+  mapTransportZHistory.clear();
   mapSelectedPlayerName = null;
   clearSelectedBotWaypoint();
   renderMapCanvas();
@@ -5829,11 +5878,17 @@ async function refreshMapPositions(): Promise<void> {
         if (distance >= 0.5) mapMovingPlayers.add(player.name);
       }
       mapAllPlayers = snapshot.players;
+      mapAllTransports = snapshot.transports ?? [];
+      recordTransportZSamples();
       mapMovementStartedAt = performance.now();
       animateMapMovement();
       if ($mapStatusText) {
         const source = snapshot.source === 'worldserver' ? 'LIVE world state' : 'DB fallback (saved positions)';
-        $mapStatusText.textContent = `${source} • ${mapMovingPlayers.size} moving • ${new Date(snapshot.capturedAt).toLocaleTimeString()}`;
+        const transportCount = getMapFilteredTransports().length;
+        $mapStatusText.textContent =
+          `${source} • ${mapMovingPlayers.size} moving` +
+          (transportCount > 0 ? ` • ${transportCount} transports` : '') +
+          ` • ${new Date(snapshot.capturedAt).toLocaleTimeString()}`;
       }
     } catch {
       if ($mapStatusText) $mapStatusText.textContent = 'Position refresh failed; showing last snapshot';
@@ -6038,6 +6093,42 @@ function renderMapCanvas(): void {
       ctx.shadowBlur  = isSelected ? 3 : 2;
       ctx.fillText(p.name, x + markerRadius + 5, y + 4);
       ctx.shadowBlur = 0;
+    }
+  }
+
+  // Transports (ships, zeppelins, trams, elevators) as amber diamonds, with a
+  // green ▲ or red ▼ while they are climbing or descending.
+  for (const t of getMapFilteredTransports()) {
+    const { x, y } = projectWorldToViewport(t, bounds, content);
+    const size = 6 * markerScale;
+    ctx.beginPath();
+    ctx.moveTo(x, y - size);
+    ctx.lineTo(x + size, y);
+    ctx.lineTo(x, y + size);
+    ctx.lineTo(x - size, y);
+    ctx.closePath();
+    ctx.fillStyle = '#f39c12';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 224, 130, 0.9)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    const trend = getTransportZTrend(t.map, t.entry);
+    if (trend !== 0) {
+      const ax = x - size - 6 * markerScale;
+      const ah = 5 * markerScale;
+      ctx.beginPath();
+      if (trend > 0) {
+        ctx.moveTo(ax, y - ah);
+        ctx.lineTo(ax + ah * 0.8, y + ah * 0.4);
+        ctx.lineTo(ax - ah * 0.8, y + ah * 0.4);
+      } else {
+        ctx.moveTo(ax, y + ah);
+        ctx.lineTo(ax + ah * 0.8, y - ah * 0.4);
+        ctx.lineTo(ax - ah * 0.8, y - ah * 0.4);
+      }
+      ctx.closePath();
+      ctx.fillStyle = trend > 0 ? '#2ecc71' : '#e74c3c';
+      ctx.fill();
     }
   }
   ctx.shadowBlur = 0;
@@ -6247,6 +6338,14 @@ $mapCanvas?.addEventListener('mousemove', (e) => {
     const dx = mx - x, dy = my - y;
     if (dx * dx + dy * dy < 100) { hit = p; break; }
   }
+  let hitTransport: MapTransportPosition | null = null;
+  if (!hit) {
+    for (const t of getMapFilteredTransports()) {
+      const { x, y } = projectWorldToViewport(t, bounds, layout.content);
+      const dx = mx - x, dy = my - y;
+      if (dx * dx + dy * dy < 100) { hitTransport = t; break; }
+    }
+  }
 
   if (hit) {
     const isBot     = /^RNDBOT/i.test(hit.account);
@@ -6258,6 +6357,20 @@ $mapCanvas?.addEventListener('mousemove', (e) => {
       `<div style="color:var(--text-muted);font-size:11px">(${hit.position_x.toFixed(0)}, ${hit.position_y.toFixed(0)})</div>` +
       (isBot ? '<div class="map-tooltip-bot">BOT</div>' : '');
     // Keep tooltip inside canvas bounds
+    const tw = 160;
+    const tx = mx + 14 + tw > W ? mx - tw - 6 : mx + 14;
+    const ty = my - 10 < 0 ? my + 10 : my - 10;
+    $mapTooltip.style.left = `${tx}px`;
+    $mapTooltip.style.top  = `${ty}px`;
+    $mapTooltip.classList.remove('hidden');
+    $mapCanvas.style.cursor = 'pointer';
+  } else if (hitTransport) {
+    const trend = getTransportZTrend(hitTransport.map, hitTransport.entry);
+    const trendLabel = trend > 0 ? ' ▲ ascending' : trend < 0 ? ' ▼ descending' : '';
+    $mapTooltip.innerHTML =
+      `<div class="map-tooltip-name">${escapeHtml(hitTransport.name)}</div>` +
+      `<div>Route ${(hitTransport.pathProgress / 100).toFixed(1)}%${trendLabel}</div>` +
+      `<div style="color:var(--text-muted);font-size:11px">(${hitTransport.position_x.toFixed(0)}, ${hitTransport.position_y.toFixed(0)}, ${hitTransport.position_z.toFixed(0)})</div>`;
     const tw = 160;
     const tx = mx + 14 + tw > W ? mx - tw - 6 : mx + 14;
     const ty = my - 10 < 0 ? my + 10 : my - 10;
@@ -6635,6 +6748,8 @@ const instanceLiveAuras = new LiveAuraStore();
 const instanceLivePassengers = new LivePassengerStore();
 // Spawned game objects with models (battleground banners and flags, doors).
 const instanceLiveGameObjects = new LiveGameObjectStore();
+// The map's moving transports (ships, zeppelins, trams, elevators).
+const instanceLiveTransports = new LiveTransportBuffer();
 // Harmful auras and raid markers, for the plates.
 const instanceLiveDebuffs = new LiveDebuffStore();
 const instanceLiveMarkers = new LiveMarkerStore();
@@ -6736,6 +6851,7 @@ function syncInstanceLiveStream(): void {
   instanceLiveAuras.clear();
   instanceLivePassengers.clear();
   instanceLiveGameObjects.clear();
+  instanceLiveTransports.clear();
   instanceLiveDebuffs.clear();
   instanceLiveMarkers.clear();
   instanceCombatEffects.clear();
@@ -6801,6 +6917,11 @@ function syncInstanceLiveStream(): void {
       if (instanceLiveStream !== stream) return;
       instanceLiveGameObjects.push(update, performance.now());
       noteInstanceDebug('gameobjects', update.objects.length);
+    },
+    onTransports: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveTransports.push(update, performance.now());
+      noteInstanceDebug('transports', update.transports.length);
     },
     onDebuffs: (update) => {
       if (instanceLiveStream !== stream) return;
@@ -7263,6 +7384,19 @@ function getInstanceGameObjectPoses(now: number): GameObjectPose[] {
       yaw: 2 * Math.atan2(object.rotation[2], object.rotation[3]),
       scale: object.scale || 1,
     }));
+}
+
+// The map's moving transports (ships, zeppelins, trams, elevators), posed
+// like the game objects they are; the server's orientation is the turn
+// about Z, so it is the yaw as is.
+function getInstanceTransportPoses(now: number): GameObjectPose[] {
+  return instanceLiveTransports.samples(now).map((transport) => ({
+    guid: transport.guid,
+    displayId: transport.displayId,
+    position: [transport.x, transport.y, transport.z] as Point3,
+    yaw: transport.orientation,
+    scale: 1,
+  }));
 }
 
 function readStoredInstanceDecisions(): boolean {
@@ -8389,7 +8523,10 @@ function drawInstanceCanvas(followPass: boolean): void {
   const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
     live ? instanceLiveAuras.all(liveNow) : undefined, (spellId) => instanceSpellNames.isTaunt(spellId),
     { glows: instanceShowGlows, circles: instanceShowCircles }, (unit) => creatureTypeFlags.get(unit) ?? 0) ?? 0;
-  sceneView?.setGameObjects(live && instanceView3d ? getInstanceGameObjectPoses(liveNow) : [], liveNow);
+  const gameObjectPoses = live && instanceView3d
+    ? getInstanceGameObjectPoses(liveNow).concat(getInstanceTransportPoses(liveNow))
+    : [];
+  sceneView?.setGameObjects(gameObjectPoses, liveNow);
   const bossPositions = creatures
     .filter((creature) => isBossCreature(creature, instanceCreatureInfo.get(creature.entry)))
     .map((creature): Point3 => [creature.x, creature.y, creature.z]);

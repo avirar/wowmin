@@ -22,12 +22,12 @@ const {
   TelemetryStream,
   parseAppearanceDatagram, parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parseDebuffDatagram,
   parseGameObjectDatagram, parseMarkerDatagram, parsePassengerDatagram, parsePathDatagram, parseStreamDatagram,
-  parseUnitAuraDatagram,
+  parseTransportDatagram, parseUnitAuraDatagram,
 } = loadModule('../src/telemetry-stream.ts');
 const {
   LIVE_AURA_STALE_MS, LIVE_BOT_STALE_MS, LIVE_CREATURE_STALE_MS, LIVE_PATH_STALE_MS, LIVE_RENDER_DELAY_MS, LiveAuraStore, LiveBotStore,
   LiveCreatureBuffer,
-  LivePathStore, LivePositionBuffer,
+  LivePathStore, LivePositionBuffer, LiveTransportBuffer,
   creaturePathKey, lerpAngle, trimPathToPosition,
 } = loadModule('../renderer/scripts/utils/live-positions.ts');
 const near = (actual, expected, label) => assert.ok(Math.abs(actual - expected) < 1e-4, `${label}: ${actual} != ${expected}`);
@@ -574,6 +574,57 @@ test('parses game objects and forgets despawned ones', () => {
   assert.equal(store.all(1000 + LIVE_GAMEOBJECT_STALE_MS + 1).length, 0);
 });
 
+// Builds a WMT1 datagram exactly as BuildTransportDatagrams in WowMinTelemetry.cpp does.
+function transportDatagram({ mapId = 601, instanceId = 7, serverTimeMs = 5000, transports }) {
+  const header = Buffer.alloc(24);
+  header.write('WMT1', 0, 'latin1');
+  header.writeUInt8(1, 4);
+  header.writeUInt32LE(mapId, 8);
+  header.writeUInt32LE(instanceId, 12);
+  header.writeUInt32LE(serverTimeMs, 16);
+  header.writeUInt16LE(transports.length, 20);
+  return Buffer.concat([header, ...transports.map((transport) => {
+    const entry = Buffer.alloc(36);
+    entry.writeUInt32LE(transport.guid, 0);
+    entry.writeUInt32LE(transport.entry, 4);
+    [transport.x, transport.y, transport.z, transport.orientation].forEach((value, index) => entry.writeFloatLE(value, 8 + index * 4));
+    entry.writeUInt32LE(transport.pathProgress, 24);
+    entry.writeUInt32LE(transport.displayId, 28);
+    return entry;
+  })]);
+}
+
+test('parses a transport datagram and rejects truncated or foreign ones', () => {
+  const zeppelin = { guid: 30, entry: 18442, x: 1541.77, y: 5854.94, z: 3190.0, orientation: 0.75, pathProgress: 3200, displayId: 18472 };
+  const parsed = parseTransportDatagram(transportDatagram({ transports: [zeppelin] }));
+  assert.equal(parsed.mapId, 601);
+  assert.equal(parsed.instanceId, 7);
+  assert.equal(parsed.serverTimeMs, 5000);
+  const [transport] = parsed.transports;
+  assert.equal(transport.guid, 30);
+  assert.equal(transport.entry, 18442);
+  near(transport.x, 1541.77, 'x');
+  near(transport.y, 5854.94, 'y');
+  near(transport.z, 3190.0, 'z');
+  near(transport.orientation, 0.75, 'orientation');
+  assert.equal(transport.pathProgress, 3200);
+  assert.equal(transport.displayId, 18472);
+  const good = transportDatagram({ transports: [zeppelin] });
+  assert.equal(parseTransportDatagram(good.subarray(0, good.length - 1)), null);
+  assert.equal(parseCreatureDatagram(good), null);
+});
+
+test('interpolates transports and drops ones that stop being sent', () => {
+  const buffer = new LiveTransportBuffer();
+  const transport = (z) => ({ guid: 30, entry: 18442, x: 0, y: 0, z, orientation: 0.5, pathProgress: 4000, displayId: 18472 });
+  buffer.push({ transports: [transport(100)] }, 1000);
+  buffer.push({ transports: [transport(110)] }, 1100);
+  const [sample] = buffer.samples(1100 + LIVE_RENDER_DELAY_MS - 50);
+  near(sample.z, 105, 'halfway');
+  near(sample.orientation, 0.5, 'facing');
+  assert.equal(buffer.samples(1100 + LIVE_CREATURE_STALE_MS + 1).length, 0);
+});
+
 // Builds a WMD1/WMR1 datagram as WowMinTelemetry.cpp does.
 function entriesDatagram(magic, entries) {
   const header = Buffer.alloc(24);
@@ -644,7 +695,7 @@ test('accepts stream v1-v3 for every family and rejects unknown versions', () =>
     ['WMP1', parsePathDatagram], ['WMC1', parseCreatureDatagram], ['WMB1', parseBotDatagram],
     ['WMA1', parseAppearanceDatagram], ['WME1', parseCombatEventDatagram], ['WMU1', parseUnitAuraDatagram],
     ['WMV1', parsePassengerDatagram], ['WMG1', parseGameObjectDatagram], ['WMD1', parseDebuffDatagram],
-    ['WMR1', parseMarkerDatagram],
+    ['WMR1', parseMarkerDatagram], ['WMT1', parseTransportDatagram],
   ];
   for (const version of [1, 2, 3]) {
     const frame = parseStreamDatagram(datagram({ version, players: [tankard] }));

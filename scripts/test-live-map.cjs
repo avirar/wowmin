@@ -148,6 +148,38 @@ test('parses protocol v7 battleground flag carrier state', () => {
   assert.equal(snapshot.players[0].flagCarrier, true);
 });
 
+test('parses protocol v8 transport positions', () => {
+  const playerRow = [
+    'WMAP', 'Jaspianus', 571, 0, 100, 200, 30, 1.5, 80, 1, 1, 9001, 1, 1, 1,
+    0, 0, 0, 0, 0, 0, 1, 100, 0, 100, 0, 0, '', 0, 0, -1, -1, 1, 31,
+  ].join('|');
+  const transportRow = [
+    'WTRN', 18442, 'Stormwind%7COrgrimmar%20Zeppelin', 0, 0, 1541.77, 5854.94, 3190.0, 0.75, 3200, 18472,
+  ].join('|');
+  const snapshot = parseLiveMapTelemetrySnapshot([
+    'WMAP_VERSION|8', playerRow, transportRow, 'WMAP_END|1|1|0|0|0|0|0|0',
+  ].join('\n'));
+  assert.equal(snapshot.players.length, 1);
+  const [transport] = snapshot.transports;
+  assert.equal(transport.entry, 18442);
+  assert.equal(transport.name, 'Stormwind|Orgrimmar Zeppelin');
+  assert.equal(transport.map, 0);
+  assert.equal(transport.position_x, 1541.77);
+  assert.equal(transport.orientation, 0.75);
+  assert.equal(transport.pathProgress, 3200);
+  assert.equal(transport.displayId, 18472);
+});
+
+test('rejects v8 snapshots with mismatched transport counts or stray rows', () => {
+  const transportRow = ['WTRN', 18442, 'Zeppelin', 0, 0, 1, 2, 3, 0.5, 100, 18472].join('|');
+  // The count says no transports, one was sent.
+  assert.equal(parseLiveMapTelemetrySnapshot(`WMAP_VERSION|8\n${transportRow}\nWMAP_END|0|0|0|0|0|0|0|0`), null);
+  // A transport with too few fields.
+  assert.equal(parseLiveMapTelemetrySnapshot('WMAP_VERSION|8\nWTRN|18442|Zeppelin|0|0|1|2|3\nWMAP_END|0|1|0|0|0|0|0|0'), null);
+  // A v7 snapshot never carries transports.
+  assert.equal(parseLiveMapTelemetrySnapshot(`WMAP_VERSION|7\n${transportRow}\nWMAP_END|0|0|0|0|0|0|0`), null);
+});
+
 test('rejects truncated snapshots', () => {
   const message = 'WMAP|Jaspianus|571|0|1|2|3|4|80|1|1|9001|1|1|0\nWMAP_END|2';
   assert.equal(parseLiveMapTelemetry(message), null);

@@ -1,6 +1,6 @@
 import type {
   MapPlayerPosition, StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
-  StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamUnitAuraUpdate,
+  StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamTransport, StreamTransportUpdate, StreamUnitAuraUpdate,
 } from '../../../src/types/api';
 
 // Buffers stream samples per player and interpolates between them, drawing a
@@ -148,6 +148,36 @@ export class LiveCreatureBuffer {
 
   samples(now: number): StreamCreatureSample[] {
     const current: StreamCreatureSample[] = [];
+    for (const [guid, samples] of this.history) {
+      if (now - samples[samples.length - 1].at > LIVE_CREATURE_STALE_MS) this.history.delete(guid);
+      else current.push(sampleHistory(samples, now));
+    }
+    return current;
+  }
+}
+
+// Transports are re-sent with every snapshot; a missing one is despawned
+// (the module only streams maps' live transports).
+export class LiveTransportBuffer {
+  private readonly history = new Map<number, TimedSample<StreamTransport>[]>();
+
+  push(update: StreamTransportUpdate, receivedAt: number): void {
+    for (const sample of update.transports) {
+      const samples = this.history.get(sample.guid) ?? [];
+      samples.push({ at: receivedAt, sample });
+      if (samples.length > HISTORY_LENGTH) samples.shift();
+      this.history.set(sample.guid, samples);
+    }
+  }
+
+  clear(): void {
+    this.history.clear();
+  }
+
+  // The transport's state at `now - LIVE_RENDER_DELAY_MS`, or null if it is
+  // not being streamed.
+  samples(now: number): StreamTransport[] {
+    const current: StreamTransport[] = [];
     for (const [guid, samples] of this.history) {
       if (now - samples[samples.length - 1].at > LIVE_CREATURE_STALE_MS) this.history.delete(guid);
       else current.push(sampleHistory(samples, now));

@@ -4,6 +4,7 @@ import type {
   MapInstanceState,
   MapPlayerPosition,
   MapSessionEvent,
+  MapTransportPosition,
 } from './types/api';
 
 const TELEMETRY_FIELDS_V1 = 15;
@@ -12,6 +13,8 @@ const TELEMETRY_FIELDS_V3 = 31;
 const TELEMETRY_FIELDS_V4 = 32;
 const TELEMETRY_FIELDS_V6 = 34;
 const TELEMETRY_FIELDS_V7 = 34;
+// entry|name|mapId|instanceId|x|y|z|orientation|pathProgress|displayId.
+const TRANSPORT_FIELDS = 11;
 const BATTLEGROUND_FIELDS = 17;
 const OBJECTIVE_FIELDS = 5;
 const INSTANCE_FIELDS = 4;
@@ -21,6 +24,7 @@ const EVENT_FIELDS = 14;
 
 export interface LiveMapTelemetrySnapshot {
   players: MapPlayerPosition[];
+  transports: MapTransportPosition[];
   battlegrounds: MapBattlegroundState[];
   instances: MapInstanceState[];
   deaths: MapInstanceDeath[];
@@ -53,12 +57,13 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
   const protocolVersion = versionLines.length > 0
     ? finiteNumber(versionLines[0].slice('WMAP_VERSION|'.length))
     : 1;
-  if (![1, 2, 3, 4, 5, 6, 7].includes(protocolVersion ?? 0)
+  if (![1, 2, 3, 4, 5, 6, 7, 8].includes(protocolVersion ?? 0)
     || versionLines.some((line) => finiteNumber(line.slice('WMAP_VERSION|'.length)) !== protocolVersion)) {
     return null;
   }
 
   const players: MapPlayerPosition[] = [];
+  const transports: MapTransportPosition[] = [];
   const battlegrounds: MapBattlegroundState[] = [];
   const instances: MapInstanceState[] = [];
   const deaths: MapInstanceDeath[] = [];
@@ -66,6 +71,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
   const battlegroundsByKey = new Map<string, MapBattlegroundState>();
   const instancesByKey = new Map<string, MapInstanceState>();
   let declaredPlayerCount: number | null = null;
+  let declaredTransportCount = 0;
   let declaredBattlegroundCount = 0;
   let declaredObjectiveCount = 0;
   let declaredInstanceCount = 0;
@@ -80,19 +86,35 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
     if (line.startsWith('WMAP_END|')) {
       const counts = line.split('|').slice(1).map(finiteNumber);
       if (counts.some((value) => value === null)) return null;
+      if (protocolVersion === 8 && counts.length !== 8) return null;
       if ((protocolVersion === 5 || protocolVersion === 6 || protocolVersion === 7) && counts.length !== 7) return null;
       if (protocolVersion === 4 && counts.length !== 6) return null;
       if (protocolVersion === 3 && counts.length !== 3) return null;
       if ((protocolVersion ?? 0) < 3 && counts.length !== 1) return null;
-      [
-        declaredPlayerCount,
-        declaredBattlegroundCount = 0,
-        declaredObjectiveCount = 0,
-        declaredInstanceCount = 0,
-        declaredBossCount = 0,
-        declaredDeathCount = 0,
-        declaredEventCount = 0,
-      ] = counts as number[];
+      // v8 inserts the transport count after the player count; older versions
+      // have no slot for it.
+      if (protocolVersion === 8) {
+        [
+          declaredPlayerCount,
+          declaredTransportCount,
+          declaredBattlegroundCount = 0,
+          declaredObjectiveCount = 0,
+          declaredInstanceCount = 0,
+          declaredBossCount = 0,
+          declaredDeathCount = 0,
+          declaredEventCount = 0,
+        ] = counts as number[];
+      } else {
+        [
+          declaredPlayerCount,
+          declaredBattlegroundCount = 0,
+          declaredObjectiveCount = 0,
+          declaredInstanceCount = 0,
+          declaredBossCount = 0,
+          declaredDeathCount = 0,
+          declaredEventCount = 0,
+        ] = counts as number[];
+      }
       continue;
     }
     if (line.startsWith('WBG|')) {
@@ -204,10 +226,23 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
         targetType, targetName, valueId, valueName, amount });
       continue;
     }
+    if (line.startsWith('WTRN|')) {
+      if (protocolVersion !== 8) return null;
+      const fields = line.split('|');
+      if (fields.length !== TRANSPORT_FIELDS) return null;
+      const name = decodeTelemetryField(fields[2]);
+      const values = [...fields.slice(1, 2), ...fields.slice(3, 9), ...fields.slice(9, 11)].map(finiteNumber);
+      if (name === null || values.some((value) => value === null)) return null;
+      const [entry, map, instanceId, position_x, position_y, position_z, orientation, pathProgress, displayId] =
+        values as number[];
+      transports.push({ entry, name, map, instanceId, position_x, position_y, position_z, orientation,
+        pathProgress, displayId });
+      continue;
+    }
     if (!line.startsWith('WMAP|')) continue;
 
     const fields = line.split('|');
-    const expectedFields = protocolVersion === 7
+    const expectedFields = protocolVersion === 7 || protocolVersion === 8
       ? TELEMETRY_FIELDS_V7
       : protocolVersion === 6
         ? TELEMETRY_FIELDS_V6
@@ -296,6 +331,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
   }
 
   if (declaredPlayerCount !== players.length
+    || declaredTransportCount !== transports.length
     || declaredBattlegroundCount !== battlegrounds.length
     || declaredObjectiveCount !== parsedObjectiveCount
     || declaredInstanceCount !== instances.length
@@ -304,7 +340,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
     || declaredEventCount !== events.length) {
     return null;
   }
-  return { players, battlegrounds, instances, deaths, events };
+  return { players, transports, battlegrounds, instances, deaths, events };
 }
 
 export function parseLiveMapTelemetry(message: string): MapPlayerPosition[] | null {

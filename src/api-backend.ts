@@ -244,6 +244,7 @@ function filterTelemetrySnapshot(
   return {
     ...snapshot,
     players: snapshot.players.filter((player) => matchesSession(player.map, player.instanceId)),
+    transports: snapshot.transports.filter((transport) => matchesSession(transport.map, transport.instanceId)),
     battlegrounds: snapshot.battlegrounds.filter((state) => matchesSession(state.mapId, state.instanceId)),
     instances: snapshot.instances.filter((state) => matchesSession(state.mapId, state.instanceId)),
     deaths: snapshot.deaths.filter((death) => matchesSession(death.mapId, death.instanceId)),
@@ -1144,6 +1145,7 @@ apiRouter.handle('map:getPlayerPositions', async (_event, mapId?: number, instan
   });
   return {
     players,
+    transports: [],
     battlegrounds: [],
     instances: [],
     deaths: [],

@@ -474,6 +474,27 @@ export interface StreamGameObjectUpdate {
   objects: StreamGameObject[];
 }
 
+// A moving transport (ship, zeppelin, tram, elevator) from the stream's WMT1
+// datagrams, keyed by its low GUID.
+export interface StreamTransport {
+  guid: number;
+  entry: number;
+  x: number;
+  y: number;
+  z: number;
+  orientation: number;
+  // 0..10000 through the current route cycle.
+  pathProgress: number;
+  displayId: number;
+}
+
+export interface StreamTransportUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  transports: StreamTransport[];
+}
+
 export interface StreamBotUpdate {
   mapId: number;
   instanceId: number;
@@ -492,6 +513,7 @@ export interface StreamListeners {
   onUnitAuras?: (update: StreamUnitAuraUpdate) => void;
   onPassengers?: (update: StreamPassengerUpdate) => void;
   onGameObjects?: (update: StreamGameObjectUpdate) => void;
+  onTransports?: (update: StreamTransportUpdate) => void;
   onDebuffs?: (update: StreamDebuffUpdate) => void;
   onMarkers?: (update: StreamMarkerUpdate) => void;
 }
@@ -523,8 +545,24 @@ export interface StreamPathUpdate {
   paths: StreamPath[];
 }
 
+// A live transport (ship, zeppelin, tram, elevator) from the worldserver's
+// WTRN records. pathProgress runs 0..10000 through the current route cycle.
+export interface MapTransportPosition {
+  entry: number;
+  name: string;
+  map: number;
+  instanceId: number;
+  position_x: number;
+  position_y: number;
+  position_z: number;
+  orientation: number;
+  pathProgress: number;
+  displayId: number;
+}
+
 export interface MapPlayerSnapshot {
   players: MapPlayerPosition[];
+  transports: MapTransportPosition[];
   battlegrounds: MapBattlegroundState[];
   instances: MapInstanceState[];
   deaths: MapInstanceDeath[];

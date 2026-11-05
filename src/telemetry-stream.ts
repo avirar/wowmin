@@ -2,7 +2,7 @@ import * as dgram from 'dgram';
 
 import type {
   StreamAppearance, StreamAppearanceUpdate, StreamAuraCategory, StreamBotDecision, StreamCombatEvent, StreamCombatEventKind,
-  StreamCombatEventUpdate, StreamDebuff, StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamUnitDebuffs, StreamPassenger, StreamPassengerUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
+  StreamCombatEventUpdate, StreamDebuff, StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamUnitDebuffs, StreamPassenger, StreamPassengerUpdate, StreamTransport, StreamTransportUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
   StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus,
 } from './types/api';
 
@@ -32,9 +32,11 @@ const PASSENGER_MAGIC = 'WMV1';
 const GAMEOBJECT_MAGIC = 'WMG1';
 const DEBUFF_MAGIC = 'WMD1';
 const MARKER_MAGIC = 'WMR1';
+const TRANSPORT_MAGIC = 'WMT1';
 const DEBUFF_SIZE = 16;
 const MARKER_SIZE = 8;
 const GAMEOBJECT_SIZE = 48;
+const TRANSPORT_SIZE = 36;
 const PASSENGER_SIZE = 12;
 const VERSION = 3;
 const LEGACY_VERSION = 1;
@@ -392,6 +394,26 @@ export function parseGameObjectDatagram(buffer: Buffer): StreamGameObjectUpdate 
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, objects };
 }
 
+export function parseTransportDatagram(buffer: Buffer): StreamTransportUpdate | null {
+  const header = readEntryHeader(buffer, TRANSPORT_MAGIC);
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * TRANSPORT_SIZE) return null;
+  const transports: StreamTransport[] = [];
+  for (let index = 0; index < header.count; index += 1) {
+    const offset = PATH_HEADER_SIZE + index * TRANSPORT_SIZE;
+    transports.push({
+      guid: buffer.readUInt32LE(offset),
+      entry: buffer.readUInt32LE(offset + 4),
+      x: buffer.readFloatLE(offset + 8),
+      y: buffer.readFloatLE(offset + 12),
+      z: buffer.readFloatLE(offset + 16),
+      orientation: buffer.readFloatLE(offset + 20),
+      pathProgress: buffer.readUInt32LE(offset + 24),
+      displayId: buffer.readUInt32LE(offset + 28),
+    });
+  }
+  return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, transports };
+}
+
 export function parseDebuffDatagram(buffer: Buffer): StreamDebuffUpdate | null {
   const header = readEntryHeader(buffer, DEBUFF_MAGIC);
   if (!header) return null;
@@ -502,6 +524,8 @@ const ROUTES: Record<string, Route> = {
   [MARKER_MAGIC]: route(parseMarkerDatagram, () => true, (listener, update) => listener.onMarkers?.(update)),
   [GAMEOBJECT_MAGIC]: route(parseGameObjectDatagram, (update) => update.objects.length > 0,
     (listener, update) => listener.onGameObjects?.(update)),
+  [TRANSPORT_MAGIC]: route(parseTransportDatagram, (update) => update.transports.length > 0,
+    (listener, update) => listener.onTransports?.(update)),
   [PASSENGER_MAGIC]: route(parsePassengerDatagram, (update) => update.passengers.length > 0,
     (listener, update) => listener.onPassengers?.(update)),
   [UNIT_AURA_MAGIC]: route(parseUnitAuraDatagram, (update) => update.units.length > 0,
