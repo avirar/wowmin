@@ -60,37 +60,6 @@ export interface MinimapTileProjection {
   worldUnitsPerTile: number;
 }
 
-// The static layout of a tram line, in server coordinates: the map extent,
-// the track centerlines the cars run on, and the station platforms.
-export interface TramSchematic {
-  mapId: number;
-  bounds: InstanceCoordinateBounds;
-  tracks: Array<{ x: number; minY: number; maxY: number }>;
-  stations: Array<{ label: string; y: number }>;
-}
-
-// Deeprun Tram schematic, derived from the tram cars' gameobject rows and
-// their TransportAnimation.dbc path nodes (verified against live WTRN
-// positions: world = car origin +/- node), and the station gameobject
-// clusters (Orgrimmar y -14..44, Undercity y 2468..2515). The cars run
-// along world Y on two tracks, east (x ~4.5) and west (x ~-45.4).
-const DEEPRUN_TRAM_SCHEMATIC: TramSchematic = {
-  mapId: 369,
-  bounds: { minX: -85, maxX: 150, minY: -15, maxY: 2515 },
-  tracks: [
-    { x: 4.5, minY: -15, maxY: 2515 },
-    { x: -45.4, minY: -15, maxY: 2515 },
-  ],
-  stations: [
-    { label: 'Orgrimmar', y: 15 },
-    { label: 'Undercity', y: 2491 },
-  ],
-};
-
-export function getTramSchematic(mapId: number): TramSchematic | null {
-  return DEEPRUN_TRAM_SCHEMATIC.mapId === mapId ? DEEPRUN_TRAM_SCHEMATIC : null;
-}
-
 // WorldMapArea.dbc row 443. The client map transform swaps world X/Y;
 // therefore the rendered width is the world-Y span and height is world-X.
 const INSTANCE_MAP_PROFILES = new Map<number, InstanceMapProfile>([
@@ -100,21 +69,21 @@ const INSTANCE_MAP_PROFILES = new Map<number, InstanceMapProfile>([
     aspectRatio: (2041.6666259765625 - 895.8333129882812) / (1627.083251953125 - 862.4999389648438),
     source: 'WorldMapArea.dbc:443',
   }],
-  // The tram's static schematic extent, so the view keeps the whole line in
-  // frame even with no players aboard.
+  // The Deeprun Tram's artwork extent (assets/instances/369.json, from the
+  // client's WMO minimap quads), so the view keeps the whole line in frame
+  // even before the artwork loads or with no players aboard.
   [369, {
     mapId: 369,
-    bounds: DEEPRUN_TRAM_SCHEMATIC.bounds,
-    aspectRatio: (DEEPRUN_TRAM_SCHEMATIC.bounds.maxY - DEEPRUN_TRAM_SCHEMATIC.bounds.minY)
-      / (DEEPRUN_TRAM_SCHEMATIC.bounds.maxX - DEEPRUN_TRAM_SCHEMATIC.bounds.minX),
-    source: 'gameobject rows + TransportAnimation.dbc schematic',
+    bounds: { minX: -323.11760239664716, maxX: 196.25371260579414, minY: -77.2214956766766, maxY: 2566.708073567708 },
+    aspectRatio: (2566.708073567708 - -77.2214956766766) / (196.25371260579414 - -323.11760239664716),
+    source: 'WMO minimap quads (369.json)',
   }],
 ]);
 
 // Public (instanceId 0) non-continent maps Instance Watch shows as their own
 // sessions: the 2D Live Map covers the continents, these maps do not belong
-// anywhere else. A map qualifies when the view can draw it, by schematic or
-// by extracted client artwork.
+// anywhere else. A map qualifies when the view can draw it by extracted
+// client artwork.
 const PUBLIC_INSTANCE_WATCH_MAPS = new Set<number>([369, 609]);
 // Public watch maps listed even with zero players aboard.
 const ALWAYS_ON_PUBLIC_WATCH_MAPS = [369];

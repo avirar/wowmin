@@ -25,7 +25,6 @@ const {
   getInstanceMapProfile,
   getInstanceProjectionViewport,
   getParticipantDungeonFloor,
-  getTramSchematic,
   groupActiveInstanceSessions,
   isSceneryCreature,
   parseInstanceSessionKey,
@@ -172,30 +171,28 @@ test('Warsong Gulch uses fixed client-calibrated bounds and swapped axes', () =>
   assert.equal(bottomRight.y, 800);
 });
 
-test('keeps the whole Deeprun Tram in frame from its static schematic', () => {
+test('keeps the whole Deeprun Tram in frame from its artwork bounds', () => {
   const profile = getInstanceMapProfile(369);
   assert.ok(profile);
-  assert.notEqual(profile.source, 'WorldMapArea.dbc:443');
-  const schematic = getTramSchematic(369);
-  assert.equal(schematic.mapId, 369);
-  assert.equal(schematic.tracks.length, 2);
-  for (const track of schematic.tracks) {
-    assert.ok(track.x >= schematic.bounds.minX && track.x <= schematic.bounds.maxX);
-    assert.equal(track.minY, schematic.bounds.minY);
-    assert.equal(track.maxY, schematic.bounds.maxY);
+  // The bounds match assets/instances/369.json (the client's WMO minimap
+  // quad art), so the flat view lines up with the art before it loads.
+  assert.equal(profile.bounds.minX, -323.11760239664716);
+  assert.equal(profile.bounds.maxX, 196.25371260579414);
+  assert.equal(profile.bounds.minY, -77.2214956766766);
+  assert.equal(profile.bounds.maxY, 2566.708073567708);
+  // The two tracks (x ~4.5 and x ~-45.4) and the stations the tram links
+  // (Ironforge at y ~10, Stormwind at y ~2491) all sit inside the bounds.
+  for (const x of [4.5, -45.4]) {
+    assert.ok(x > profile.bounds.minX && x < profile.bounds.maxX);
   }
-  // The station platforms sit at the line's two ends, inside the bounds.
-  assert.equal(schematic.stations.map((station) => station.label).join(','), 'Orgrimmar,Undercity');
-  for (const station of schematic.stations) {
-    assert.ok(station.y > schematic.bounds.minY && station.y < schematic.bounds.maxY);
+  for (const y of [10, 2491]) {
+    assert.ok(y > profile.bounds.minY && y < profile.bounds.maxY);
   }
-  // A mid-tunnel car projects near the strip's centre; the tram has no art,
-  // so no other map carries a schematic.
+  // A mid-tunnel car projects near the strip's centre.
   const middle = projectInstancePosition(
-    { position_x: schematic.tracks[0].x, position_y: (schematic.bounds.minY + schematic.bounds.maxY) / 2 },
+    { position_x: 4.5, position_y: (profile.bounds.minY + profile.bounds.maxY) / 2 },
     profile.bounds, 800, 60);
   assert.ok(Math.abs(middle.x - 400) < 1);
-  assert.equal(getTramSchematic(609), null);
 });
 
 test('pan and anchored zoom preserve the selected map point', () => {

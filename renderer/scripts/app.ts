@@ -1,7 +1,7 @@
 /// <reference path="./types/window.d.ts" />
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
-import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, buildActiveInstanceSessions, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getTramSchematic, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
+import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, buildActiveInstanceSessions, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
 import { clampIsoPitch, type CompassPoint, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getCompassDirections, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView, type SceneLighting } from './instance-scene/scene-view';
 import type { MapLights } from './utils/map-light';
@@ -6583,6 +6583,7 @@ const $instanceViewControls = $<HTMLElement>('instance-view-controls');
 const $instanceRotateLeftBtn = $<HTMLButtonElement>('instance-rotate-left-btn');
 const $instanceRotateRightBtn = $<HTMLButtonElement>('instance-rotate-right-btn');
 const $instanceView3dBtn = $<HTMLButtonElement>('instance-view-3d-btn');
+const $instanceArtSourceBtn = $<HTMLButtonElement>('instance-art-source-btn');
 const $instanceCompass = document.getElementById('instance-compass') as SVGSVGElement | null;
 const $instanceFadeRange = $<HTMLInputElement>('instance-fade-range');
 const $instanceFadeRangeValue = $<HTMLOutputElement>('instance-fade-range-value');
@@ -6638,6 +6639,30 @@ interface InstanceMapAssetMetadata {
   worldMapBounds?: InstanceCoordinateBounds | null;
   projection?: { type: 'worldMapArea' | 'minimapTiles' | 'dungeonFloors' };
   floors?: DungeonMapFloor[];
+  // Where the map's own artwork came from (the renderer's source label).
+  source?: string;
+  // Other artworks the map has (e.g. the paper minimap tiles beside the
+  // WMO quad art): the flat view can switch between them.
+  alternates?: InstanceMapArtAlternate[];
+}
+
+// An alternate artwork, carrying everything the flat view needs to draw it
+// in place of the metadata's own image: its bounds (or tile grid), its
+// floors when it is a dungeon-floors export, and where it came from.
+interface InstanceMapArtAlternate {
+  image: string;
+  width?: number;
+  height?: number;
+  worldMapBounds?: InstanceCoordinateBounds | null;
+  minTileX?: number;
+  minTileY?: number;
+  maxTileX?: number;
+  maxTileY?: number;
+  gridSize?: number;
+  worldUnitsPerTile?: number;
+  projection?: { type: 'worldMapArea' | 'minimapTiles' | 'dungeonFloors' };
+  floors?: DungeonMapFloor[];
+  source: string;
 }
 
 // <mapId>.scene.json, written by npm run extract:scenes.
@@ -6665,6 +6690,8 @@ interface LoadedInstanceMapAsset {
   metadata: InstanceMapAssetMetadata;
   image?: HTMLImageElement;
   floorImages: Map<number, HTMLImageElement>;
+  // Loaded images for the metadata's alternates, in their listed order.
+  alternateImages: Array<{ image?: HTMLImageElement; floorImages: Map<number, HTMLImageElement> }>;
 }
 
 let activeInstanceSessions: ActiveInstanceSession[] = [];
@@ -7089,6 +7116,101 @@ function readStoredInstanceView3d(): boolean {
   return readStoredFlag(INSTANCE_VIEW_3D_STORAGE_KEY, true);
 }
 
+// The flat map's artwork per map when it has more than one (0 is the
+// metadata's own image; 1..n are its alternates), as a stored JSON map of
+// map id to index.
+const INSTANCE_ART_SOURCE_STORAGE_KEY = 'wowmin.instanceArtSource';
+const instanceArtSourceIndices = new Map<number, number>();
+try {
+  for (const [mapId, index] of Object.entries(JSON.parse(readStoredSetting(INSTANCE_ART_SOURCE_STORAGE_KEY) ?? '{}'))) {
+    if (Number.isInteger(Number(index)) && Number(index) >= 0) {
+      instanceArtSourceIndices.set(Number(mapId), Number(index));
+    }
+  }
+} catch {
+  // A corrupted stored value starts the viewer on the primary artwork.
+}
+
+function storeInstanceArtSource(mapId: number, index: number): void {
+  instanceArtSourceIndices.set(mapId, index);
+  storeSetting(INSTANCE_ART_SOURCE_STORAGE_KEY, JSON.stringify(Object.fromEntries(instanceArtSourceIndices)));
+}
+
+// The artwork the flat view draws for the map right now: the metadata's own
+// image, or the viewer-picked alternate beside it, with that artwork's
+// bounds, floors and source.
+interface ActiveInstanceArt {
+  image?: HTMLImageElement;
+  floorImages: Map<number, HTMLImageElement>;
+  width?: number;
+  height?: number;
+  worldMapBounds?: InstanceCoordinateBounds | null;
+  projection?: { type: 'worldMapArea' | 'minimapTiles' | 'dungeonFloors' };
+  floors?: DungeonMapFloor[];
+  source?: string;
+  minTileX?: number;
+  minTileY?: number;
+  maxTileX?: number;
+  maxTileY?: number;
+  gridSize?: number;
+  worldUnitsPerTile?: number;
+  isPrimary: boolean;
+}
+
+function getActiveInstanceArt(mapId: number): ActiveInstanceArt | null {
+  const asset = instanceMapAssets.get(mapId);
+  if (!asset) return null;
+  const index = instanceArtSourceIndices.get(mapId) ?? 0;
+  const metadata = asset.metadata;
+  if (index > 0) {
+    const alternate = metadata.alternates?.[index - 1];
+    const loaded = asset.alternateImages[index - 1];
+    if (!alternate || !loaded) return null;
+    return {
+      image: loaded.image,
+      floorImages: loaded.floorImages,
+      width: alternate.width,
+      height: alternate.height,
+      worldMapBounds: alternate.worldMapBounds ?? null,
+      projection: alternate.projection ?? { type: 'worldMapArea' },
+      floors: alternate.floors,
+      source: alternate.source,
+      minTileX: alternate.minTileX,
+      minTileY: alternate.minTileY,
+      maxTileX: alternate.maxTileX,
+      maxTileY: alternate.maxTileY,
+      gridSize: alternate.gridSize,
+      worldUnitsPerTile: alternate.worldUnitsPerTile,
+      isPrimary: false,
+    };
+  }
+  return {
+    image: asset.image,
+    floorImages: asset.floorImages,
+    width: metadata.width,
+    height: metadata.height,
+    worldMapBounds: metadata.worldMapBounds ?? null,
+    projection: metadata.projection,
+    floors: metadata.floors,
+    source: metadata.source,
+    minTileX: metadata.minTileX,
+    minTileY: metadata.minTileY,
+    maxTileX: metadata.maxTileX,
+    maxTileY: metadata.maxTileY,
+    gridSize: metadata.gridSize,
+    worldUnitsPerTile: metadata.worldUnitsPerTile,
+    isPrimary: true,
+  };
+}
+
+// A short label for the artwork source toggle button.
+function instanceArtSourceLabel(art: ActiveInstanceArt): string {
+  const source = art.source ?? (art.isPrimary ? 'client' : '');
+  if (source.includes('minimap quads')) return 'quads';
+  if (source.includes('tiles')) return 'tiles';
+  return source.length > 12 ? `${source.slice(0, 12)}…` : source;
+}
+
 function clampInstanceRenderScale(scale: number): number {
   return Number.isFinite(scale)
     ? clamp(scale, INSTANCE_RENDER_SCALE_MIN, 1)
@@ -7401,6 +7523,21 @@ function getInstanceTransportPoses(now: number): GameObjectPose[] {
     yaw: transport.orientation,
     scale: 1,
   }));
+}
+
+// The same vehicles from the 1 s position snapshot, for public maps that run
+// no WMT1 stream (the Deeprun Tram's cars): their entry is the identity, and
+// the display's client model stands where the server puts them.
+function getInstanceSnapshotTransportPoses(mapId: number): GameObjectPose[] {
+  return instanceSnapshotTransports
+    .filter((transport) => transport.map === mapId && transport.instanceId === 0)
+    .map((transport) => ({
+      guid: transport.entry,
+      displayId: transport.displayId,
+      position: [transport.position_x, transport.position_y, transport.position_z] as Point3,
+      yaw: transport.orientation,
+      scale: 1,
+    }));
 }
 
 function readStoredInstanceDecisions(): boolean {
@@ -7957,7 +8094,20 @@ async function loadInstanceMapAsset(mapId: number): Promise<void> {
     } else {
       throw new Error('instance map metadata has no images');
     }
-    instanceMapAssets.set(mapId, { metadata, image, floorImages });
+    // The alternates the flat view can switch to, with their floors.
+    const alternateImages = await Promise.all((metadata.alternates ?? []).map(async (alternate) => {
+      const alternateFloors = new Map<number, HTMLImageElement>();
+      let alternateImage: HTMLImageElement | undefined;
+      if (alternate.floors?.length) {
+        await Promise.all(alternate.floors.map(async (floor) => {
+          alternateFloors.set(floor.id, await loadImage(floor.image));
+        }));
+      } else if (alternate.image) {
+        alternateImage = await loadImage(alternate.image);
+      }
+      return { image: alternateImage, floorImages: alternateFloors };
+    }));
+    instanceMapAssets.set(mapId, { metadata, image, floorImages, alternateImages });
   } catch {
     instanceMapAssets.set(mapId, null);
   } finally {
@@ -8370,39 +8520,15 @@ function drawInstanceFlatBackground(
   ctx.strokeRect(viewport.x + 0.5, viewport.y + 0.5, viewport.width - 1, viewport.height - 1);
 }
 
-// A public (non-instance) session's drawing: the map's schematic when it has
-// one, and the map's live tram cars. Public maps run no WMT1 stream, so the
+// A public (non-instance) session's drawing: the map's live tram cars. The
+// map artwork (the client's own minimap art) already shows the tracks and
+// stations, so nothing else is drawn. Public maps run no WMT1 stream, so the
 // cars come from the 1 s position snapshot.
 function drawInstanceWatchPublicMap(
   ctx: CanvasRenderingContext2D,
   session: ActiveInstanceSession,
   projection: MapProjection,
 ): void {
-  const schematic = getTramSchematic(session.mapId);
-  if (schematic) {
-    // The two track centerlines the cars run on.
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.85)';
-    ctx.lineWidth = 3;
-    for (const track of schematic.tracks) {
-      const from = projection.worldToScreen(track.x, track.minY, 0);
-      const to = projection.worldToScreen(track.x, track.maxY, 0);
-      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
-    }
-    // The station platforms: a strip across both tracks, labelled.
-    ctx.font = '12px sans-serif';
-    for (const station of schematic.stations) {
-      const left = projection.worldToScreen(-60, station.y, 0);
-      const right = projection.worldToScreen(20, station.y, 0);
-      ctx.strokeStyle = 'rgba(203, 213, 225, 0.9)';
-      ctx.lineWidth = 7;
-      ctx.beginPath(); ctx.moveTo(left.x, left.y); ctx.lineTo(right.x, right.y); ctx.stroke();
-      ctx.fillStyle = 'rgba(226, 232, 240, 0.9)';
-      ctx.shadowColor = 'rgba(0,0,0,0.8)';
-      ctx.shadowBlur = 3;
-      ctx.fillText(station.label, right.x + 8, right.y + 4);
-      ctx.shadowBlur = 0;
-    }
-  }
   for (const transport of instanceSnapshotTransports) {
     if (transport.map !== session.mapId || transport.instanceId !== 0) continue;
     const origin = projection.worldToScreen(transport.position_x, transport.position_y, transport.position_z);
@@ -8522,20 +8648,26 @@ function drawInstanceCanvas(followPass: boolean): void {
   void loadInstanceScene(session.mapId);
   const loadedAsset = instanceMapAssets.get(session.mapId) ?? null;
   const profile = getInstanceMapProfile(session.mapId);
-  const projectionType = loadedAsset?.metadata.projection?.type;
-  const floors = getInstanceFloors(session.mapId);
+  // The artwork the viewer picked for this map: the metadata's own image, or
+  // one of its alternates (e.g. the paper tiles beside the WMO quad art).
+  const art = getActiveInstanceArt(session.mapId);
+  const projectionType = art?.projection?.type;
+  // The floors of the artwork shown (its own when it carries them), so the
+  // floor selector and the floor's image and bounds always agree; the 3D
+  // scene's floors win for the primary artwork, as before.
+  const floors = art && !art.isPrimary && art.floors?.length ? art.floors : getInstanceFloors(session.mapId);
   const floor = getSelectedDungeonFloor(session, floors);
-  const asset = projectionType === 'minimapTiles'
+  const asset = art && (projectionType === 'minimapTiles'
     || projectionType === 'dungeonFloors'
-    || (projectionType === 'worldMapArea' && (profile || loadedAsset?.metadata.worldMapBounds))
-    ? loadedAsset
+    || (projectionType === 'worldMapArea' && (profile || art.worldMapBounds)))
+    ? art
     : null;
   // The flat view's map of that floor, if it has one.
-  const mapFloor = floor ? asset?.metadata.floors?.find((candidate) => candidate.id === floor.id) : undefined;
+  const mapFloor = floor ? asset?.floors?.find((candidate) => candidate.id === floor.id) : undefined;
   const assetImage = floor ? asset?.floorImages.get(floor.id) : asset?.image;
-  const bounds = floor?.bounds ?? asset?.metadata.worldMapBounds ?? getStableInstanceBounds(session);
-  const assetWidth = mapFloor?.width ?? asset?.metadata.width;
-  const assetHeight = mapFloor?.height ?? asset?.metadata.height;
+  const bounds = floor?.bounds ?? asset?.worldMapBounds ?? getStableInstanceBounds(session);
+  const assetWidth = mapFloor?.width ?? asset?.width;
+  const assetHeight = mapFloor?.height ?? asset?.height;
   const aspectRatio = assetWidth && assetHeight
     ? assetWidth / assetHeight
     : profile?.aspectRatio;
@@ -8607,10 +8739,16 @@ function drawInstanceCanvas(followPass: boolean): void {
   const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
     live ? instanceLiveAuras.all(liveNow) : undefined, (spellId) => instanceSpellNames.isTaunt(spellId),
     { glows: instanceShowGlows, circles: instanceShowCircles }, (unit) => creatureTypeFlags.get(unit) ?? 0) ?? 0;
-  const gameObjectPoses = live && instanceView3d
+  // The snapshot's vehicles cover public maps (no WMT1 stream); where the
+  // streamed poses and the snapshot name the same vehicle, the stream wins.
+  const streamedPoses = live && instanceView3d
     ? getInstanceGameObjectPoses(liveNow).concat(getInstanceTransportPoses(liveNow))
     : [];
-  sceneView?.setGameObjects(gameObjectPoses, liveNow);
+  const streamedGuids = new Set(streamedPoses.map((pose) => pose.guid));
+  const snapshotPoses = session.instanceId === 0 && instanceView3d
+    ? getInstanceSnapshotTransportPoses(session.mapId).filter((pose) => !streamedGuids.has(pose.guid))
+    : [];
+  sceneView?.setGameObjects(streamedPoses.concat(snapshotPoses), liveNow);
   const bossPositions = creatures
     .filter((creature) => isBossCreature(creature, instanceCreatureInfo.get(creature.entry)))
     .map((creature): Point3 => [creature.x, creature.y, creature.z]);
@@ -8625,10 +8763,17 @@ function drawInstanceCanvas(followPass: boolean): void {
   const viewTransform = getInstanceViewTransform();
   if ($instanceWatchScene) $instanceWatchScene.hidden = !isoView;
   const hasScene = Boolean(getInstanceScene(session.mapId) && getInstanceSceneView());
-  $instanceViewControls?.classList.toggle('hidden', !hasScene);
+  // The artwork toggle needs the controls cluster even on maps without a 3D
+  // scene, so it stays shown then too.
+  const hasArtAlternates = Boolean(loadedAsset?.metadata.alternates?.length);
+  $instanceViewControls?.classList.toggle('hidden', !hasScene && !hasArtAlternates);
   if ($instanceRotateLeftBtn) $instanceRotateLeftBtn.disabled = !isoView;
   if ($instanceRotateRightBtn) $instanceRotateRightBtn.disabled = !isoView;
   if ($instanceView3dBtn) $instanceView3dBtn.setAttribute('aria-pressed', String(instanceView3d));
+  if ($instanceArtSourceBtn) {
+    $instanceArtSourceBtn.hidden = !hasArtAlternates;
+    if (hasArtAlternates && art) $instanceArtSourceBtn.textContent = instanceArtSourceLabel(art);
+  }
   $instanceCompass?.toggleAttribute('hidden', !isoView);
   if (isoView) updateInstanceCompass();
   let projection: MapProjection;
@@ -8642,8 +8787,8 @@ function drawInstanceCanvas(followPass: boolean): void {
       : { x: 0, y: 0, width, height };
     instanceBaseViewport = baseViewport;
     const viewport = applyInstanceViewTransform(baseViewport, viewTransform);
-    projection = createFlatProjection(asset?.metadata.projection?.type === 'minimapTiles'
-      ? { type: 'minimapTiles', tiles: resolveMinimapTileProjection(asset.metadata) }
+    projection = createFlatProjection(asset?.projection?.type === 'minimapTiles'
+      ? { type: 'minimapTiles', tiles: resolveMinimapTileProjection(asset) }
       : { type: 'bounds', bounds }, viewport);
     drawInstanceFlatBackground(ctx, viewport, assetImage, Boolean(profile));
     if (session.instanceId === 0) drawInstanceWatchPublicMap(ctx, session, projection);
@@ -9207,11 +9352,16 @@ function renderInstanceWatcher(): void {
     const selectedFloor = session ? getSelectedDungeonFloor(session) : null;
     const difficulty = getInstanceDifficultyLabel(representative?.mapType, representative?.difficulty);
     const age = getInstanceAgeLabel(representative?.sessionStartedAt);
-    const artSource = session && session.instanceId === 0 && getTramSchematic(session.mapId)
-      ? 'tram schematic'
-      : session && isInstanceSceneShowing(session.mapId)
-        ? '3D scene'
-        : hasArtwork ? 'client artwork' : profile ? 'client-calibrated bounds' : 'auto-fit bounds';
+    const activeArt = session ? getActiveInstanceArt(session.mapId) : null;
+    // A picked alternate (not the metadata's own art) is named after its
+    // source; the primary artwork is the unmarked "client artwork".
+    const artSource = session && isInstanceSceneShowing(session.mapId)
+      ? '3D scene'
+      : hasArtwork
+        ? activeArt && !activeArt.isPrimary && activeArt.source
+          ? instanceArtSourceLabel(activeArt)
+          : 'client artwork'
+        : profile ? 'client-calibrated bounds' : 'auto-fit bounds';
     const details = session
       ? [
         `Map ${session.mapId}`,
@@ -9465,6 +9615,18 @@ $instanceWatchCanvas?.addEventListener('keydown', (event) => {
 $instanceRotateLeftBtn?.addEventListener('click', () => rotateInstanceView(-1));
 $instanceRotateRightBtn?.addEventListener('click', () => rotateInstanceView(1));
 $instanceView3dBtn?.addEventListener('click', () => setInstanceView3d(!instanceView3d));
+// Cycle the flat map's artwork: the metadata's own image, then each
+// alternate (0..n-1). Only meaningful for maps with alternates.
+$instanceArtSourceBtn?.addEventListener('click', () => {
+  const session = getSelectedInstanceSession();
+  const metadata = session ? instanceMapAssets.get(session.mapId)?.metadata : null;
+  const count = metadata?.alternates?.length ?? 0;
+  if (!session || !count) return;
+  const current = instanceArtSourceIndices.get(session.mapId) ?? 0;
+  storeInstanceArtSource(session.mapId, (current + 1) % (count + 1));
+  setInstanceViewTransform({ zoom: 1, panX: 0, panY: 0 });
+  renderInstanceWatcher();
+});
 for (const control of document.querySelectorAll<HTMLElement>('.instance-3d-control')) {
   control.classList.toggle('hidden', !instanceView3d);
 }
