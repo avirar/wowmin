@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-// Composes a map's minimap artwork from its WMO minimap quads, for maps the
-// client has no minimap tiles for (Deeprun Tram and the like). The quads are
+// Composes a map's minimap artwork from its WMO minimap quads. The quads are
 // the same textures the in-game minimap draws (see
 // scripts/scene/quad-minimap.mjs for the client maths); this writes them
 // into <mapId>.jpg plus the <mapId>.json metadata the renderer loads, in
 // the renderer's bounds projection (width with world -Y, height with world
-// -X) at the client's 2 pixels per world unit.
+// -X) at the client's 2 pixels per world unit. For maps whose WDT is a
+// single WMO the building's placement is read from the WDT; for mixed
+// terrain+WMO maps the caller passes the ADT WMO placements (see
+// render-quad-minimaps.mjs), and with --as-alternate the image is written
+// as <mapId>-quads.* beside an existing paper artwork instead of
+// overwriting the metadata.
 //
 //   node scripts/render-quad-minimap.mjs --source /path/to/client --map 369
 
@@ -29,15 +33,16 @@ function fail(message, stack) {
 }
 
 function parseArgs(argv) {
-  const options = { map: null, output: null, source: null, dryRun: false };
+  const options = { map: null, output: null, source: null, dryRun: false, asAlternate: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--source' || arg === '-s') options.source = argv[++index];
     else if (arg === '--map') options.map = Number(argv[++index]);
     else if (arg === '--output' || arg === '-o') options.output = argv[++index];
     else if (arg === '--dry-run') options.dryRun = true;
+    else if (arg === '--as-alternate') options.asAlternate = true;
     else if (arg === '--help' || arg === '-h') {
-      console.log(fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(1, 12).join('\n').replace(/^\/\/ ?/gm, ''));
+      console.log(fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(1, 14).join('\n').replace(/^\/\/ ?/gm, ''));
       process.exit(0);
     } else fail(`Unknown argument ${arg}.`);
   }
@@ -103,33 +108,52 @@ export async function renderQuadMinimap(options) {
   const wdtBuffer = readFile(`${mapPath}.wdt`);
   if (!wdtBuffer) throw new Error(`Missing ${mapPath}.wdt`);
   const wdt = readWdt(wdtBuffer);
-  if (!wdt.wmo || !wdt.wmoOnly) throw new Error(`${entry.internalName} is not a single-WMO map; its minimap comes from tiles instead.`);
-  const wmo = loadWmo(wdt.wmo.name, readFile);
-  const wmoBaseName = path.win32.basename(wdt.wmo.name).replace(/\.wmo$/i, '');
+
+  // The placements to compose: the WDT's single building for WMO-only maps,
+  // or the caller's list (the map's ADT-placed WMOs for mixed maps).
+  const placements = options.wmos?.length
+    ? options.wmos
+    : (wdt.wmo && wdt.wmoOnly ? [wdt.wmo] : null);
+  if (!placements) {
+    throw new Error(`${entry.internalName} is not a single-WMO map and no WMO placements were given; its minimap comes from tiles instead.`);
+  }
 
   const trsBuffer = readFile('textures\\Minimap\\md5translate.trs');
   if (!trsBuffer) throw new Error('Missing textures\\Minimap\\md5translate.trs');
   const table = parseMd5TranslateTable(trsBuffer);
-  const wmoDirectory = path.win32.dirname(wdt.wmo.name).replace(/^world\\/i, '').replace(/\\/g, '/').toLowerCase();
-  const quadsByName = table.get(wmoDirectory) ?? new Map();
-  if (!table.has(wmoDirectory)) console.warn(`  ! No ${wmoDirectory} directory in md5translate.trs`);
 
-  const { position, rotation, scale } = wdt.wmo;
+  // One WMO's quad set, loaded once per file name (a placement list can
+  // carry the same WMO several times, at different placements).
+  const wmoInfo = new Map();
   const quads = [];
-  for (const group of wmo.groups) {
-    for (const quad of groupQuadGrid(group.boundingBox, group.index)) {
-      const name = quadTextureName(wmoBaseName, quad.groupId, quad.x, quad.y);
-      quads.push({
-        ...quad,
-        name,
-        hash: quadsByName.get(name.toLowerCase()) ?? null,
-        world: transformBounds(quad.bounds, rotation, position, scale),
-      });
+  const baseNames = [];
+  for (const placement of placements) {
+    let info = wmoInfo.get(placement.name);
+    if (!info) {
+      const wmo = loadWmo(placement.name, readFile);
+      const base = path.win32.basename(placement.name).replace(/\.wmo$/i, '');
+      const directory = path.win32.dirname(placement.name).replace(/^world\\/i, '').replace(/\\/g, '/').toLowerCase();
+      const byName = table.get(directory) ?? new Map();
+      if (!table.has(directory)) console.warn(`  ! No ${directory} directory in md5translate.trs`);
+      info = { base, byName, groups: wmo.groups };
+      wmoInfo.set(placement.name, info);
+    }
+    if (!baseNames.includes(info.base)) baseNames.push(info.base);
+    for (const group of info.groups) {
+      for (const quad of groupQuadGrid(group.boundingBox, group.index)) {
+        const name = quadTextureName(info.base, quad.groupId, quad.x, quad.y);
+        quads.push({
+          ...quad,
+          name,
+          hash: info.byName.get(name.toLowerCase()) ?? null,
+          world: transformBounds(quad.bounds, placement.rotation, placement.position, placement.scale),
+        });
+      }
     }
   }
   quads.sort((left, right) => left.world.minZ + left.world.maxZ - (right.world.minZ + right.world.maxZ));
   const missing = quads.filter((quad) => !quad.hash);
-  console.log(`  ${quads.length} quads computed for ${wmoBaseName} (${quads.length - missing.length} in md5translate.trs)`);
+  console.log(`  ${quads.length} quads computed for ${baseNames.join(', ')} (${quads.length - missing.length} in md5translate.trs)`);
   if (options.dryRun) {
     for (const quad of quads) console.log(`    ${quad.name}${quad.hash ? '' : '  (missing)'}`);
     return { quads };
@@ -161,6 +185,9 @@ export async function renderQuadMinimap(options) {
   }
   const encoded = encodeRgba({ width: image.width, height: image.height, rgba: image.pixels });
   const extension = encoded.mimeType === 'image/png' ? 'png' : 'jpg';
+  // Beside an existing paper artwork the quad image takes its own file name
+  // and the metadata is merged in by the caller instead of written here.
+  const imageBase = options.asAlternate ? `${options.map}-quads` : `${options.map}`;
   const metadata = {
     schemaVersion: 1,
     mapId: options.map,
@@ -168,7 +195,7 @@ export async function renderQuadMinimap(options) {
     mapType: entry.mapType,
     mapTypeLabel: entry.mapTypeLabel,
     clientDirectory: entry.internalName,
-    image: `${options.map}.${extension}`,
+    image: `${imageBase}.${extension}`,
     width: image.width,
     height: image.height,
     worldMapBounds: {
@@ -179,14 +206,18 @@ export async function renderQuadMinimap(options) {
     },
     projection: { type: 'worldMapArea' },
     // The image's source, for the subtitle: the client's own indoor
-    // minimap quads, not continent tiles.
-    source: `WMO minimap quads (${wmoBaseName})`,
+    // minimap quads, not the paper artwork.
+    source: `WMO minimap quads (${baseNames.join(', ')})`,
   };
   const outputDir = options.output;
   fs.mkdirSync(outputDir, { recursive: true });
   fs.writeFileSync(path.join(outputDir, metadata.image), encoded.data);
-  fs.writeFileSync(path.join(outputDir, `${options.map}.json`), `${JSON.stringify(metadata, null, 2)}\n`);
-  console.log(`  Wrote ${path.join(outputDir, metadata.image)} (${image.width}x${image.height}) and ${options.map}.json`);
+  if (!options.asAlternate) {
+    fs.writeFileSync(path.join(outputDir, `${options.map}.json`), `${JSON.stringify(metadata, null, 2)}\n`);
+    console.log(`  Wrote ${path.join(outputDir, metadata.image)} (${image.width}x${image.height}) and ${options.map}.json`);
+  } else {
+    console.log(`  Wrote ${path.join(outputDir, metadata.image)} (${image.width}x${image.height}); merge it into ${options.map}.json`);
+  }
   return { quads, image, metadata };
 }
 

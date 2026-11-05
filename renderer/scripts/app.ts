@@ -7203,12 +7203,11 @@ function getActiveInstanceArt(mapId: number): ActiveInstanceArt | null {
   };
 }
 
-// A short label for the artwork source toggle button.
+// A short label for the artwork source toggle button and the map subtitle:
+// quads (the client's indoor minimap) or paper (zone map, minimap tiles,
+// dungeon floors).
 function instanceArtSourceLabel(art: ActiveInstanceArt): string {
-  const source = art.source ?? (art.isPrimary ? 'client' : '');
-  if (source.includes('minimap quads')) return 'quads';
-  if (source.includes('tiles')) return 'tiles';
-  return source.length > 12 ? `${source.slice(0, 12)}…` : source;
+  return art.source?.includes('quads') ? 'quads' : 'paper';
 }
 
 function clampInstanceRenderScale(scale: number): number {
@@ -9353,15 +9352,15 @@ function renderInstanceWatcher(): void {
     const difficulty = getInstanceDifficultyLabel(representative?.mapType, representative?.difficulty);
     const age = getInstanceAgeLabel(representative?.sessionStartedAt);
     const activeArt = session ? getActiveInstanceArt(session.mapId) : null;
-    // A picked alternate (not the metadata's own art) is named after its
-    // source; the primary artwork is the unmarked "client artwork".
+    // The flat view names its active artwork after its source: the
+    // client's indoor minimap quads, or its paper artwork.
     const artSource = session && isInstanceSceneShowing(session.mapId)
       ? '3D scene'
-      : hasArtwork
-        ? activeArt && !activeArt.isPrimary && activeArt.source
-          ? instanceArtSourceLabel(activeArt)
-          : 'client artwork'
-        : profile ? 'client-calibrated bounds' : 'auto-fit bounds';
+      : hasArtwork && activeArt
+        ? `client artwork (${instanceArtSourceLabel(activeArt)})`
+        : hasArtwork
+          ? 'client artwork'
+          : profile ? 'client-calibrated bounds' : 'auto-fit bounds';
     const details = session
       ? [
         `Map ${session.mapId}`,
