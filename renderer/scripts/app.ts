@@ -1,7 +1,7 @@
 /// <reference path="./types/window.d.ts" />
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
-import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
+import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, buildActiveInstanceSessions, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getTramSchematic, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
 import { clampIsoPitch, type CompassPoint, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getCompassDirections, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView, type SceneLighting } from './instance-scene/scene-view';
 import type { MapLights } from './utils/map-light';
@@ -6671,6 +6671,10 @@ let activeInstanceSessions: ActiveInstanceSession[] = [];
 let activeBattlegrounds = new Map<string, MapBattlegroundState>();
 let activeInstanceStates = new Map<string, MapInstanceState>();
 let activeInstanceDeaths = new Map<string, MapInstanceDeath[]>();
+// The latest snapshot's transports, for a public (non-instance) session's
+// tram cars: instanceId 0 runs no WMT1 stream, so the cars come from the
+// 1 s position snapshot instead.
+let instanceSnapshotTransports: MapTransportPosition[] = [];
 let selectedInstanceKey: string | null = null;
 let selectedInstancePlayerName: string | null = null;
 let instanceRefreshInFlight = false;
@@ -8137,13 +8141,25 @@ function renderInstanceSessionOptions(): void {
   // refresh away from it while the operator is choosing a session.
   if (document.activeElement === $instanceSessionSelect) return;
   const hasSessions = activeInstanceSessions.length > 0;
+  const optionHtml = (session: ActiveInstanceSession): string => {
+    const participantCount = session.key === selectedInstanceKey
+      ? withLivePositions(session)?.players.length ?? session.players.length
+      : session.players.length;
+    return `<option value="${escapeHtml(session.key)}"${session.key === selectedInstanceKey ? ' selected' : ''}>${escapeHtml(session.label)} (${participantCount})</option>`;
+  };
+  // Public watch maps (Deeprun Tram, Ebon Hold) lead; the runtime instances
+  // and battlegrounds follow.
+  const publicSessions = activeInstanceSessions.filter((session) => session.instanceId === 0);
+  const instanceSessions = activeInstanceSessions.filter((session) => session.instanceId > 0);
   const html = hasSessions
-    ? activeInstanceSessions.map((session) => {
-      const participantCount = session.key === selectedInstanceKey
-        ? withLivePositions(session)?.players.length ?? session.players.length
-        : session.players.length;
-      return `<option value="${escapeHtml(session.key)}"${session.key === selectedInstanceKey ? ' selected' : ''}>${escapeHtml(session.label)} (${participantCount})</option>`;
-    }).join('')
+    ? [
+      publicSessions.length
+        ? `<optgroup label="Maps">${publicSessions.map(optionHtml).join('')}</optgroup>`
+        : '',
+      instanceSessions.length
+        ? `<optgroup label="Instance / Battleground">${instanceSessions.map(optionHtml).join('')}</optgroup>`
+        : '',
+    ].filter(Boolean).join('')
     : '<option value="">No active sessions</option>';
   $instanceSessionSelect.disabled = !hasSessions;
   if ($instanceSessionSelect.innerHTML !== html) $instanceSessionSelect.innerHTML = html;
@@ -8354,6 +8370,74 @@ function drawInstanceFlatBackground(
   ctx.strokeRect(viewport.x + 0.5, viewport.y + 0.5, viewport.width - 1, viewport.height - 1);
 }
 
+// A public (non-instance) session's drawing: the map's schematic when it has
+// one, and the map's live tram cars. Public maps run no WMT1 stream, so the
+// cars come from the 1 s position snapshot.
+function drawInstanceWatchPublicMap(
+  ctx: CanvasRenderingContext2D,
+  session: ActiveInstanceSession,
+  projection: MapProjection,
+): void {
+  const schematic = getTramSchematic(session.mapId);
+  if (schematic) {
+    // The two track centerlines the cars run on.
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.85)';
+    ctx.lineWidth = 3;
+    for (const track of schematic.tracks) {
+      const from = projection.worldToScreen(track.x, track.minY, 0);
+      const to = projection.worldToScreen(track.x, track.maxY, 0);
+      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+    }
+    // The station platforms: a strip across both tracks, labelled.
+    ctx.font = '12px sans-serif';
+    for (const station of schematic.stations) {
+      const left = projection.worldToScreen(-60, station.y, 0);
+      const right = projection.worldToScreen(20, station.y, 0);
+      ctx.strokeStyle = 'rgba(203, 213, 225, 0.9)';
+      ctx.lineWidth = 7;
+      ctx.beginPath(); ctx.moveTo(left.x, left.y); ctx.lineTo(right.x, right.y); ctx.stroke();
+      ctx.fillStyle = 'rgba(226, 232, 240, 0.9)';
+      ctx.shadowColor = 'rgba(0,0,0,0.8)';
+      ctx.shadowBlur = 3;
+      ctx.fillText(station.label, right.x + 8, right.y + 4);
+      ctx.shadowBlur = 0;
+    }
+  }
+  for (const transport of instanceSnapshotTransports) {
+    if (transport.map !== session.mapId || transport.instanceId !== 0) continue;
+    const origin = projection.worldToScreen(transport.position_x, transport.position_y, transport.position_z);
+    // Screen angle from the server heading, through the projection itself.
+    const ahead = projection.worldToScreen(
+      transport.position_x + Math.cos(transport.orientation) * 10,
+      transport.position_y + Math.sin(transport.orientation) * 10,
+      transport.position_z,
+    );
+    drawTramCarMarker(ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x));
+  }
+}
+
+// A tram car: a small amber rounded body pointed along its heading.
+function drawTramCarMarker(
+  ctx: CanvasRenderingContext2D,
+  point: { x: number; y: number },
+  angle: number,
+): void {
+  ctx.save();
+  ctx.translate(point.x, point.y);
+  ctx.rotate(angle);
+  ctx.fillStyle = '#fbbf24';
+  ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.rect(-7, -3, 14, 6);
+  ctx.fill();
+  ctx.stroke();
+  // The cab, so the heading reads.
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.55)';
+  ctx.fillRect(3, -3, 4, 6);
+  ctx.restore();
+}
+
 // Glides the pan towards a follow target: each frame closes part of the gap
 // (INSTANCE_FOLLOW_EASE_MS takes it most of the way), and a new target only
 // moves the destination, so a unit moving every frame is tracked smoothly.
@@ -8562,6 +8646,7 @@ function drawInstanceCanvas(followPass: boolean): void {
       ? { type: 'minimapTiles', tiles: resolveMinimapTileProjection(asset.metadata) }
       : { type: 'bounds', bounds }, viewport);
     drawInstanceFlatBackground(ctx, viewport, assetImage, Boolean(profile));
+    if (session.instanceId === 0) drawInstanceWatchPublicMap(ctx, session, projection);
   }
   const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>) =>
     projection.worldToScreen(position.position_x, position.position_y, position.position_z);
@@ -9104,7 +9189,8 @@ function renderInstanceWatcher(): void {
   if ($instanceSessionCount) $instanceSessionCount.textContent = String(activeInstanceSessions.length);
   renderInstanceSessionOptions();
   renderInstanceBattleground(battleground);
-  const isDungeonRaid = Boolean(session && !isBattleground);
+  // Public watch maps are not dungeons or raids: no boss or death history.
+  const isDungeonRaid = Boolean(session && !isBattleground && session.instanceId > 0);
   renderInstanceEncounters(getSelectedInstanceState(), getSelectedInstanceDeaths(), isDungeonRaid);
   renderInstancePlayerList(displayedSession);
   if ($instanceWatchTitle) $instanceWatchTitle.textContent = session?.label ?? 'No active instance';
@@ -9121,16 +9207,19 @@ function renderInstanceWatcher(): void {
     const selectedFloor = session ? getSelectedDungeonFloor(session) : null;
     const difficulty = getInstanceDifficultyLabel(representative?.mapType, representative?.difficulty);
     const age = getInstanceAgeLabel(representative?.sessionStartedAt);
+    const artSource = session && session.instanceId === 0 && getTramSchematic(session.mapId)
+      ? 'tram schematic'
+      : session && isInstanceSceneShowing(session.mapId)
+        ? '3D scene'
+        : hasArtwork ? 'client artwork' : profile ? 'client-calibrated bounds' : 'auto-fit bounds';
     const details = session
       ? [
         `Map ${session.mapId}`,
-        `runtime instance ${session.instanceId}`,
+        session.instanceId > 0 ? `runtime instance ${session.instanceId}` : 'public map',
         difficulty,
         age ? `active ${age}` : null,
         selectedFloor ? `floor ${selectedFloor.floorIndex}` : null,
-        session && isInstanceSceneShowing(session.mapId)
-          ? '3D scene'
-          : hasArtwork ? 'client artwork' : profile ? 'client-calibrated bounds' : 'auto-fit bounds',
+        artSource,
         instanceLiveStream?.status === 'streaming' ? 'live stream' : null,
       ].filter(Boolean).join(' · ')
       : null;
@@ -9163,7 +9252,10 @@ async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
     );
 
     if (!isDiscovery) {
-      const updatedSession = groupActiveInstanceSessions(snapshot.players)
+      // Rebuilt from the filtered snapshot, so an emptied public watch map
+      // (no players aboard) is kept by its always-on entry rather than
+      // forcing a full discovery every poll.
+      const updatedSession = buildActiveInstanceSessions(snapshot.players)
         .find((session) => session.key === selectedInstanceKey);
       if (updatedSession) {
         activeInstanceSessions = activeInstanceSessions.map((session) =>
@@ -9188,7 +9280,7 @@ async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
         const key = `${death.mapId}:${death.instanceId}`;
         activeInstanceDeaths.set(key, [...(activeInstanceDeaths.get(key) ?? []), death]);
       }
-      activeInstanceSessions = groupActiveInstanceSessions(snapshot.players);
+      activeInstanceSessions = buildActiveInstanceSessions(snapshot.players);
       instanceLastDiscoveryAt = Date.now();
       const activeKeys = new Set(activeInstanceSessions.map((session) => session.key));
       for (const key of instanceViewBounds.keys()) {
@@ -9219,6 +9311,7 @@ async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
       }
     }
 
+    instanceSnapshotTransports = snapshot.transports ?? [];
     const selectedStillActive = activeInstanceSessions.some((session) => session.key === selectedInstanceKey);
     if (!selectedStillActive) {
       selectedInstanceKey = activeInstanceSessions[0]?.key ?? null;

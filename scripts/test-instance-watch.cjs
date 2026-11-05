@@ -16,6 +16,7 @@ context.exports = context.module.exports;
 vm.runInNewContext(output, context);
 const {
   applyInstanceViewTransform,
+  buildActiveInstanceSessions,
   getBattlegroundObjectiveLabels,
   getBattlegroundStatusLabel,
   getBattlegroundStrategyLabel,
@@ -24,6 +25,7 @@ const {
   getInstanceMapProfile,
   getInstanceProjectionViewport,
   getParticipantDungeonFloor,
+  getTramSchematic,
   groupActiveInstanceSessions,
   isSceneryCreature,
   parseInstanceSessionKey,
@@ -47,7 +49,10 @@ test('parses an active runtime session key into telemetry filters', () => {
   assert.equal(parsed.mapId, 489);
   assert.equal(parsed.instanceId, 12);
   assert.equal(parseInstanceSessionKey('489'), null);
-  assert.equal(parseInstanceSessionKey('489:0'), null);
+  // A 0 instanceId is a public (non-instance) watch map session.
+  const publicKey = parseInstanceSessionKey('369:0');
+  assert.equal(publicKey.mapId, 369);
+  assert.equal(publicKey.instanceId, 0);
 });
 
 test('decodes common battleground status, strategy, and objective states', () => {
@@ -73,6 +78,44 @@ test('groups only active runtime instances', () => {
   assert.equal(sessions.length, 2);
   assert.equal(sessions[0].key, '489:12');
   assert.equal(sessions[0].players.length, 2);
+});
+
+test('groups players aboard public watch maps as map sessions', () => {
+  const sessions = groupActiveInstanceSessions([
+    player('TramRider', 369, 0, 4.5, 1000),
+    player('DK', 609, 0, 2355, -5664),
+    // A continent player is not a public watch map session.
+    player('Farmer', 0, 0, 100, 100),
+    // An unwatched public map is not one either.
+    player('Stranger', 126, 0, 0, 0),
+  ]);
+  // One player each: the runtime sort is by label, so Ebon Hold leads.
+  assert.deepEqual(
+    sessions.map((session) => session.key).join(','),
+    '609:0,369:0',
+  );
+  const tram = sessions.find((session) => session.key === '369:0');
+  const ebonHold = sessions.find((session) => session.key === '609:0');
+  assert.equal(tram.label, 'Deeprun Tram');
+  assert.equal(ebonHold.label, 'Acherus: The Ebon Hold');
+  assert.equal(tram.players.length, 1);
+});
+
+test('keeps the always-on public watch maps listed without players', () => {
+  const sessions = buildActiveInstanceSessions([
+    player('DK', 609, 0, 2355, -5664),
+    player('Alpha', 489, 12, 100, 200),
+  ]);
+  // The public sessions lead, ordered by mapId, ahead of the runtime ones.
+  assert.equal(
+    sessions.map((session) => session.key).join(','),
+    '369:0,609:0,489:12',
+  );
+  assert.equal(sessions[0].players.length, 0);
+  // Nobody anywhere: the tram is still listed.
+  const empty = buildActiveInstanceSessions([]);
+  assert.equal(empty.length, 1);
+  assert.equal(empty[0].key, '369:0');
 });
 
 test('labels map 628 as Isle of Conquest', () => {
@@ -127,6 +170,32 @@ test('Warsong Gulch uses fixed client-calibrated bounds and swapped axes', () =>
   assert.equal(topLeft.y, 0);
   assert.equal(bottomRight.x, 1200);
   assert.equal(bottomRight.y, 800);
+});
+
+test('keeps the whole Deeprun Tram in frame from its static schematic', () => {
+  const profile = getInstanceMapProfile(369);
+  assert.ok(profile);
+  assert.notEqual(profile.source, 'WorldMapArea.dbc:443');
+  const schematic = getTramSchematic(369);
+  assert.equal(schematic.mapId, 369);
+  assert.equal(schematic.tracks.length, 2);
+  for (const track of schematic.tracks) {
+    assert.ok(track.x >= schematic.bounds.minX && track.x <= schematic.bounds.maxX);
+    assert.equal(track.minY, schematic.bounds.minY);
+    assert.equal(track.maxY, schematic.bounds.maxY);
+  }
+  // The station platforms sit at the line's two ends, inside the bounds.
+  assert.equal(schematic.stations.map((station) => station.label).join(','), 'Orgrimmar,Undercity');
+  for (const station of schematic.stations) {
+    assert.ok(station.y > schematic.bounds.minY && station.y < schematic.bounds.maxY);
+  }
+  // A mid-tunnel car projects near the strip's centre; the tram has no art,
+  // so no other map carries a schematic.
+  const middle = projectInstancePosition(
+    { position_x: schematic.tracks[0].x, position_y: (schematic.bounds.minY + schematic.bounds.maxY) / 2 },
+    profile.bounds, 800, 60);
+  assert.ok(Math.abs(middle.x - 400) < 1);
+  assert.equal(getTramSchematic(609), null);
 });
 
 test('pan and anchored zoom preserve the selected map point', () => {

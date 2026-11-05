@@ -60,6 +60,37 @@ export interface MinimapTileProjection {
   worldUnitsPerTile: number;
 }
 
+// The static layout of a tram line, in server coordinates: the map extent,
+// the track centerlines the cars run on, and the station platforms.
+export interface TramSchematic {
+  mapId: number;
+  bounds: InstanceCoordinateBounds;
+  tracks: Array<{ x: number; minY: number; maxY: number }>;
+  stations: Array<{ label: string; y: number }>;
+}
+
+// Deeprun Tram schematic, derived from the tram cars' gameobject rows and
+// their TransportAnimation.dbc path nodes (verified against live WTRN
+// positions: world = car origin +/- node), and the station gameobject
+// clusters (Orgrimmar y -14..44, Undercity y 2468..2515). The cars run
+// along world Y on two tracks, east (x ~4.5) and west (x ~-45.4).
+const DEEPRUN_TRAM_SCHEMATIC: TramSchematic = {
+  mapId: 369,
+  bounds: { minX: -85, maxX: 150, minY: -15, maxY: 2515 },
+  tracks: [
+    { x: 4.5, minY: -15, maxY: 2515 },
+    { x: -45.4, minY: -15, maxY: 2515 },
+  ],
+  stations: [
+    { label: 'Orgrimmar', y: 15 },
+    { label: 'Undercity', y: 2491 },
+  ],
+};
+
+export function getTramSchematic(mapId: number): TramSchematic | null {
+  return DEEPRUN_TRAM_SCHEMATIC.mapId === mapId ? DEEPRUN_TRAM_SCHEMATIC : null;
+}
+
 // WorldMapArea.dbc row 443. The client map transform swaps world X/Y;
 // therefore the rendered width is the world-Y span and height is world-X.
 const INSTANCE_MAP_PROFILES = new Map<number, InstanceMapProfile>([
@@ -69,7 +100,24 @@ const INSTANCE_MAP_PROFILES = new Map<number, InstanceMapProfile>([
     aspectRatio: (2041.6666259765625 - 895.8333129882812) / (1627.083251953125 - 862.4999389648438),
     source: 'WorldMapArea.dbc:443',
   }],
+  // The tram's static schematic extent, so the view keeps the whole line in
+  // frame even with no players aboard.
+  [369, {
+    mapId: 369,
+    bounds: DEEPRUN_TRAM_SCHEMATIC.bounds,
+    aspectRatio: (DEEPRUN_TRAM_SCHEMATIC.bounds.maxY - DEEPRUN_TRAM_SCHEMATIC.bounds.minY)
+      / (DEEPRUN_TRAM_SCHEMATIC.bounds.maxX - DEEPRUN_TRAM_SCHEMATIC.bounds.minX),
+    source: 'gameobject rows + TransportAnimation.dbc schematic',
+  }],
 ]);
+
+// Public (instanceId 0) non-continent maps Instance Watch shows as their own
+// sessions: the 2D Live Map covers the continents, these maps do not belong
+// anywhere else. A map qualifies when the view can draw it, by schematic or
+// by extracted client artwork.
+const PUBLIC_INSTANCE_WATCH_MAPS = new Set<number>([369, 609]);
+// Public watch maps listed even with zero players aboard.
+const ALWAYS_ON_PUBLIC_WATCH_MAPS = [369];
 
 export function getInstanceFactionColor(teamId: number | undefined): string | null {
   if (teamId === 0) return '#3b82f6';
@@ -215,20 +263,24 @@ export function getInstanceProjectionViewport(
   return { x: 0, y: (height - viewportHeight) / 2, width, height: viewportHeight };
 }
 
+// A key's instanceId of 0 marks a public (non-instance) watch map session.
 export function parseInstanceSessionKey(key: string | null): { mapId: number; instanceId: number } | null {
   if (!key) return null;
   const match = key.match(/^(\d+):(\d+)$/);
   if (!match) return null;
   const mapId = Number(match[1]);
   const instanceId = Number(match[2]);
-  if (!Number.isInteger(mapId) || mapId < 0 || !Number.isInteger(instanceId) || instanceId <= 0) return null;
+  if (!Number.isInteger(mapId) || mapId < 0 || !Number.isInteger(instanceId) || instanceId < 0) return null;
   return { mapId, instanceId };
 }
 
 export function groupActiveInstanceSessions(players: MapPlayerPosition[]): ActiveInstanceSession[] {
   const grouped = new Map<string, ActiveInstanceSession>();
   for (const player of players) {
-    if (!Number.isInteger(player.instanceId) || player.instanceId <= 0) continue;
+    if (!Number.isInteger(player.instanceId) || player.instanceId < 0) continue;
+    // Public maps group only when the view can draw them; the continents
+    // belong to the 2D Live Map, not here.
+    if (player.instanceId === 0 && !PUBLIC_INSTANCE_WATCH_MAPS.has(player.map)) continue;
     const key = `${player.map}:${player.instanceId}`;
     let session = grouped.get(key);
     if (!session) {
@@ -236,7 +288,10 @@ export function groupActiveInstanceSessions(players: MapPlayerPosition[]): Activ
         key,
         mapId: player.map,
         instanceId: player.instanceId,
-        label: `${getMapName(player.map)} · #${player.instanceId}`,
+        // A public watch map is the map itself, no runtime instance number.
+        label: player.instanceId === 0
+          ? getMapName(player.map)
+          : `${getMapName(player.map)} · #${player.instanceId}`,
         players: [],
       };
       grouped.set(key, session);
@@ -246,6 +301,25 @@ export function groupActiveInstanceSessions(players: MapPlayerPosition[]): Activ
 
   return [...grouped.values()].sort((left, right) =>
     right.players.length - left.players.length || left.label.localeCompare(right.label));
+}
+
+// The dropdown's list: the always-on public watch maps (with the other
+// public maps while players are aboard), then the runtime instances and
+// battlegrounds. The public sessions lead so an emptied session falls back
+// to a map the view can always draw.
+export function buildActiveInstanceSessions(players: MapPlayerPosition[]): ActiveInstanceSession[] {
+  const publicSessions: ActiveInstanceSession[] = [];
+  const instanceSessions: ActiveInstanceSession[] = [];
+  for (const session of groupActiveInstanceSessions(players)) {
+    (session.instanceId === 0 ? publicSessions : instanceSessions).push(session);
+  }
+  for (const mapId of ALWAYS_ON_PUBLIC_WATCH_MAPS) {
+    if (!publicSessions.some((session) => session.mapId === mapId)) {
+      publicSessions.push({ key: `${mapId}:0`, mapId, instanceId: 0, label: getMapName(mapId), players: [] });
+    }
+  }
+  publicSessions.sort((left, right) => left.mapId - right.mapId);
+  return [...publicSessions, ...instanceSessions];
 }
 
 export function getInstanceCoordinateBounds(players: MapPlayerPosition[]): InstanceCoordinateBounds {
