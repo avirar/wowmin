@@ -8568,6 +8568,7 @@ function drawInstanceWatchPublicMap(
   ctx: CanvasRenderingContext2D,
   session: ActiveInstanceSession,
   projection: MapProjection,
+  scale: number,
 ): void {
   if (!instanceShowTransports) return;
   for (const transport of instanceSnapshotTransports) {
@@ -8579,7 +8580,7 @@ function drawInstanceWatchPublicMap(
       transport.position_y + Math.sin(transport.orientation) * 10,
       transport.position_z,
     );
-    drawTramCarMarker(ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x));
+    drawTramCarMarker(ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x), scale);
   }
 }
 
@@ -8588,11 +8589,12 @@ function drawTramCarMarker(
   ctx: CanvasRenderingContext2D,
   point: { x: number; y: number },
   angle: number,
+  scale: number,
 ): void {
   ctx.save();
   ctx.translate(point.x, point.y);
   ctx.rotate(angle);
-  ctx.scale(playerIconScale * FLAT_MARKER_SIZE, playerIconScale * FLAT_MARKER_SIZE);
+  ctx.scale(scale * FLAT_MARKER_SIZE, scale * FLAT_MARKER_SIZE);
   ctx.fillStyle = '#fbbf24';
   ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
   ctx.lineWidth = 1.5;
@@ -8617,6 +8619,7 @@ function drawInstanceIcStructures(
   projection: MapProjection,
   live: boolean,
   liveNow: number,
+  scale: number,
 ): void {
   const states = new Map(battleground.worldStates.map((state) => [state.id, state.value]));
   if (!instanceShowTransports && !instanceShowStructures) return;
@@ -8641,7 +8644,7 @@ function drawInstanceIcStructures(
     if (!icon) continue;
     ctx.save();
     ctx.translate(origin.x, origin.y);
-    ctx.scale(playerIconScale * FLAT_MARKER_SIZE, playerIconScale * FLAT_MARKER_SIZE);
+    ctx.scale(scale * FLAT_MARKER_SIZE, scale * FLAT_MARKER_SIZE);
     ctx.globalAlpha = breached ? 0.85 : standing ? 1 : 0.45;
     ctx.imageSmoothingEnabled = false;
     const [cellX, cellY, cellW, cellH] = gateCell(gate.faction, breached);
@@ -8674,7 +8677,7 @@ function drawInstanceIcStructures(
     // Screen angle from the server heading, through the projection itself.
     const ahead = projection.worldToScreen(ship.x + Math.cos(ship.yaw) * 10, ship.y + Math.sin(ship.yaw) * 10, ship.z);
     drawGunshipMarker(ctx, origin,
-      Math.atan2(ahead.y - origin.y, ahead.x - origin.x) + GUNSHIP_HEADING_OFFSET, faction);
+      Math.atan2(ahead.y - origin.y, ahead.x - origin.x) + GUNSHIP_HEADING_OFFSET, faction, scale);
   }
 }
 
@@ -8682,7 +8685,7 @@ function drawInstanceIcStructures(
 // so the marker turns by half a turn to point the way the ship travels.
 const GUNSHIP_HEADING_OFFSET = Math.PI;
 
-// The ship's height on screen at the icon size default.
+// The ship's height on screen at the icon size default and zoom 1.
 const GUNSHIP_MARKER_SIZE = 60;
 
 // The flat view's other structure and transport markers (the gate icons,
@@ -8690,18 +8693,19 @@ const GUNSHIP_MARKER_SIZE = 60;
 const FLAT_MARKER_SIZE = 2;
 
 // A gunship: the client's own airship minimap blip (Vehicle-Air-<side>, nose
-// up in the texture), pointed along the ship's travel heading, in the icon
-// size setting's scale.
+// up in the texture), pointed along the ship's travel heading, at the frame's
+// responsive icon scale.
 function drawGunshipMarker(
   ctx: CanvasRenderingContext2D,
   point: { x: number; y: number },
   angle: number,
   faction: 0 | 1,
+  scale: number,
 ): void {
   // The blip stands in for the 3D model until its image has loaded.
   const image = instanceClientIcons.get(faction === 0 ? 'vehicle-alliance' : 'vehicle-horde');
   if (!image) return;
-  const height = GUNSHIP_MARKER_SIZE * playerIconScale;
+  const height = GUNSHIP_MARKER_SIZE * scale;
   const width = (image.naturalWidth / image.naturalHeight) * height;
   ctx.save();
   ctx.translate(point.x, point.y);
@@ -8921,6 +8925,8 @@ function drawInstanceCanvas(followPass: boolean): void {
   const modelShown = (id: string) => Boolean(isoView) && modelIds.has(id);
   // Read after the scene, which may reset it when it reframes.
   const viewTransform = getInstanceViewTransform();
+  // This frame's icon scale at the view's zoom, as the pre-existing icons scale.
+  const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
   if ($instanceWatchScene) $instanceWatchScene.hidden = !isoView;
   const hasScene = Boolean(getInstanceScene(session.mapId) && getInstanceSceneView());
   // The artwork toggle needs the controls cluster even on maps without a 3D
@@ -8951,9 +8957,9 @@ function drawInstanceCanvas(followPass: boolean): void {
       ? { type: 'minimapTiles', tiles: resolveMinimapTileProjection(asset) }
       : { type: 'bounds', bounds }, viewport);
     drawInstanceFlatBackground(ctx, viewport, assetImage, Boolean(profile));
-    if (session.instanceId === 0) drawInstanceWatchPublicMap(ctx, session, projection);
+    if (session.instanceId === 0) drawInstanceWatchPublicMap(ctx, session, projection, markerScale);
     else if (battleground && battleground.mapId === 628) {
-      drawInstanceIcStructures(ctx, session, battleground, projection, live, liveNow);
+      drawInstanceIcStructures(ctx, session, battleground, projection, live, liveNow, markerScale);
     }
   }
   const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>) =>
@@ -8978,7 +8984,6 @@ function drawInstanceCanvas(followPass: boolean): void {
   }[] = [];
   const factionOf = (player: MapPlayerPosition): Faction | null => !battleground ? null
     : player.teamId === TEAM_ALLIANCE ? 'alliance' : player.teamId === TEAM_HORDE ? 'horde' : null;
-  const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
   // In 3D, nameplates take the labels' place; (x, y) is over the unit's head.
   const plateStyle = isoView && instancePlatesMode !== 'labels' ? instancePlatesMode : null;
   // `size` scales a plate (players' pets get smaller ones).
