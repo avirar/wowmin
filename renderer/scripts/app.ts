@@ -8693,8 +8693,8 @@ const GUNSHIP_MARKER_SIZE = 60;
 const FLAT_MARKER_SIZE = 2;
 
 // A gunship: the client's own airship minimap blip (Vehicle-Air-<side>, nose
-// up in the texture), pointed along the ship's travel heading, at the frame's
-// responsive icon scale.
+// up in the texture), pointed along the ship's travel heading, grown linearly
+// with the zoom like the map art.
 function drawGunshipMarker(
   ctx: CanvasRenderingContext2D,
   point: { x: number; y: number },
@@ -8957,9 +8957,14 @@ function drawInstanceCanvas(followPass: boolean): void {
       ? { type: 'minimapTiles', tiles: resolveMinimapTileProjection(asset) }
       : { type: 'bounds', bounds }, viewport);
     drawInstanceFlatBackground(ctx, viewport, assetImage, Boolean(profile));
-    if (session.instanceId === 0) drawInstanceWatchPublicMap(ctx, session, projection, markerScale);
+    // The structure and transport markers track the map art linearly in the
+    // zoom, like the client's minimap icons: the player icons' sqrt growth
+    // suits their small size, but it reads as the markers shrinking against
+    // the map for anything drawn at map scale.
+    const structureScale = playerIconScale * viewTransform.zoom;
+    if (session.instanceId === 0) drawInstanceWatchPublicMap(ctx, session, projection, structureScale);
     else if (battleground && battleground.mapId === 628) {
-      drawInstanceIcStructures(ctx, session, battleground, projection, live, liveNow, markerScale);
+      drawInstanceIcStructures(ctx, session, battleground, projection, live, liveNow, structureScale);
     }
   }
   const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>) =>
