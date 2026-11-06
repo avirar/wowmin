@@ -6601,6 +6601,8 @@ const $instanceLightingMode = $<HTMLSelectElement>('instance-lighting-mode');
 const $instanceObjectLightsBtn = $<HTMLButtonElement>('instance-object-lights-btn');
 const $instanceDecisionsBtn = $<HTMLButtonElement>('instance-decisions-btn');
 const $instanceModelsBtn = $<HTMLButtonElement>('instance-models-btn');
+const $instanceTransportsBtn = $<HTMLButtonElement>('instance-transports-btn');
+const $instanceStructuresBtn = $<HTMLButtonElement>('instance-structures-btn');
 const $instanceNumbersBtn = $<HTMLButtonElement>('instance-numbers-btn');
 const $instanceGlowsBtn = $<HTMLButtonElement>('instance-glows-btn');
 const $instanceCirclesBtn = $<HTMLButtonElement>('instance-circles-btn');
@@ -6786,9 +6788,17 @@ const instanceLiveDebuffs = new LiveDebuffStore();
 const instanceLiveMarkers = new LiveMarkerStore();
 // GameobjectTypes door, and GOState active: an open door, drawn as gone.
 const GAMEOBJECT_TYPE_DOOR = 0;
+// GameobjectTypes destructible building: IoC's gates and walls and their kin.
+const GAMEOBJECT_TYPE_DESTRUCTIBLE_BUILDING = 33;
 const GO_STATE_ACTIVE = 0;
 const INSTANCE_MODELS_STORAGE_KEY = 'wowmin.instanceModels';
 let instanceShowModels = readStoredInstanceModels();
+// The map's transports (elevators, gunships, ships, trams) drawn as models.
+const INSTANCE_TRANSPORTS_STORAGE_KEY = 'wowmin.instanceTransports';
+let instanceShowTransports = readStoredFlag(INSTANCE_TRANSPORTS_STORAGE_KEY, true);
+// Destructible structures (IoC's gates and walls) drawn as models.
+const INSTANCE_STRUCTURES_STORAGE_KEY = 'wowmin.instanceStructures';
+let instanceShowStructures = readStoredFlag(INSTANCE_STRUCTURES_STORAGE_KEY, true);
 // Casts, auras, swings, damage, and heals from the live stream, as effects.
 const instanceCombatEffects = new CombatEffectStore();
 const INSTANCE_NUMBERS_STORAGE_KEY = 'wowmin.instanceNumbers';
@@ -7392,6 +7402,20 @@ function setInstanceShowModels(enabled: boolean): void {
   renderInstanceCanvas();
 }
 
+function setInstanceShowTransports(enabled: boolean): void {
+  instanceShowTransports = enabled;
+  $instanceTransportsBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_TRANSPORTS_STORAGE_KEY, String(enabled));
+  renderInstanceCanvas();
+}
+
+function setInstanceShowStructures(enabled: boolean): void {
+  instanceShowStructures = enabled;
+  $instanceStructuresBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_STRUCTURES_STORAGE_KEY, String(enabled));
+  renderInstanceCanvas();
+}
+
 // A player's marker colour: their side's, as in the participant list.
 function getInstancePlayerColor(player: MapPlayerPosition): string {
   return getInstanceFactionColor(player.teamId) ?? '#94a3b8';
@@ -7503,6 +7527,7 @@ function getInstanceUnitPoses(
 function getInstanceGameObjectPoses(now: number): GameObjectPose[] {
   return instanceLiveGameObjects.all(now)
     .filter((object) => !(object.type === GAMEOBJECT_TYPE_DOOR && object.state === GO_STATE_ACTIVE))
+    .filter((object) => instanceShowStructures || object.type !== GAMEOBJECT_TYPE_DESTRUCTIBLE_BUILDING)
     .map((object) => ({
       guid: object.guid,
       displayId: object.displayId,
@@ -7516,6 +7541,7 @@ function getInstanceGameObjectPoses(now: number): GameObjectPose[] {
 // like the game objects they are; the server's orientation is the turn
 // about Z, so it is the yaw as is.
 function getInstanceTransportPoses(now: number): GameObjectPose[] {
+  if (!instanceShowTransports) return [];
   return instanceLiveTransports.samples(now).map((transport) => ({
     guid: transport.guid,
     displayId: transport.displayId,
@@ -7525,12 +7551,13 @@ function getInstanceTransportPoses(now: number): GameObjectPose[] {
   }));
 }
 
-// The same vehicles from the 1 s position snapshot, for public maps that run
-// no WMT1 stream (the Deeprun Tram's cars): their entry is the identity, and
-// the display's client model stands where the server puts them.
-function getInstanceSnapshotTransportPoses(mapId: number): GameObjectPose[] {
+// The same vehicles from the 1 s position snapshot, for maps whose WMT1
+// stream is not live: the Deeprun Tram's cars on public maps, and the
+// battleground gunships inside their BG instances. Their entry is the
+// identity, and the display's client model stands where the server puts them.
+function getInstanceSnapshotTransportPoses(mapId: number, instanceId: number): GameObjectPose[] {
   return instanceSnapshotTransports
-    .filter((transport) => transport.map === mapId && transport.instanceId === 0)
+    .filter((transport) => transport.map === mapId && transport.instanceId === instanceId)
     .map((transport) => ({
       guid: transport.entry,
       displayId: transport.displayId,
@@ -8842,14 +8869,21 @@ function drawInstanceCanvas(followPass: boolean): void {
   const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
     live ? instanceLiveAuras.all(liveNow) : undefined, (spellId) => instanceSpellNames.isTaunt(spellId),
     { glows: instanceShowGlows, circles: instanceShowCircles }, (unit) => creatureTypeFlags.get(unit) ?? 0) ?? 0;
-  // The snapshot's vehicles cover public maps (no WMT1 stream); where the
-  // streamed poses and the snapshot name the same vehicle, the stream wins.
+  // The snapshot's vehicles cover the session's map while the WMT1 stream is
+  // not live: the Deeprun Tram's cars on public maps, the battleground
+  // gunships inside their instances. Where the stream already draws the same
+  // vehicle, it wins: a snapshot pose is the transport's entry, so it is
+  // matched against the stream's entries (transport guids are another id
+  // space again, and game object guids a third — never compared across).
   const streamedPoses = live && instanceView3d
     ? getInstanceGameObjectPoses(liveNow).concat(getInstanceTransportPoses(liveNow))
     : [];
-  const streamedGuids = new Set(streamedPoses.map((pose) => pose.guid));
-  const snapshotPoses = session.instanceId === 0 && instanceView3d
-    ? getInstanceSnapshotTransportPoses(session.mapId).filter((pose) => !streamedGuids.has(pose.guid))
+  const streamedEntries = new Set(live && instanceView3d
+    ? instanceLiveTransports.samples(liveNow).map((transport) => transport.entry)
+    : []);
+  const snapshotPoses = instanceView3d && instanceShowTransports
+    ? getInstanceSnapshotTransportPoses(session.mapId, session.instanceId)
+        .filter((pose) => !streamedEntries.has(pose.guid))
     : [];
   sceneView?.setGameObjects(streamedPoses.concat(snapshotPoses), liveNow);
   const bossPositions = creatures
@@ -9773,6 +9807,10 @@ $instanceDecisionsBtn?.setAttribute('aria-pressed', String(instanceShowDecisions
 $instanceDecisionsBtn?.addEventListener('click', () => setInstanceShowDecisions(!instanceShowDecisions));
 $instanceModelsBtn?.setAttribute('aria-pressed', String(instanceShowModels));
 $instanceModelsBtn?.addEventListener('click', () => setInstanceShowModels(!instanceShowModels));
+$instanceTransportsBtn?.setAttribute('aria-pressed', String(instanceShowTransports));
+$instanceTransportsBtn?.addEventListener('click', () => setInstanceShowTransports(!instanceShowTransports));
+$instanceStructuresBtn?.setAttribute('aria-pressed', String(instanceShowStructures));
+$instanceStructuresBtn?.addEventListener('click', () => setInstanceShowStructures(!instanceShowStructures));
 $instanceNumbersBtn?.setAttribute('aria-pressed', String(instanceShowNumbers));
 $instanceNumbersBtn?.addEventListener('click', () => setInstanceShowNumbers(!instanceShowNumbers));
 $instanceGlowsBtn?.setAttribute('aria-pressed', String(instanceShowGlows));

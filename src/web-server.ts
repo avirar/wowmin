@@ -294,6 +294,7 @@ const server = createServer(async (request, response) => {
       onUnitAuras: (update) => send('auras', update),
       onPassengers: (update) => send('passengers', update),
       onGameObjects: (update) => send('gameobjects', update),
+      onTransports: (update) => send('transports', update),
       onDebuffs: (update) => send('debuffs', update),
       onMarkers: (update) => send('markers', update),
     });

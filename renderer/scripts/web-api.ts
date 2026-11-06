@@ -83,6 +83,7 @@ const wowminAPI: WowminAPI = {
       source.addEventListener('auras', (event) => listeners.onUnitAuras?.(data(event)));
       source.addEventListener('passengers', (event) => listeners.onPassengers?.(data(event)));
       source.addEventListener('gameobjects', (event) => listeners.onGameObjects?.(data(event)));
+      source.addEventListener('transports', (event) => listeners.onTransports?.(data(event)));
       source.addEventListener('debuffs', (event) => listeners.onDebuffs?.(data(event)));
       source.addEventListener('markers', (event) => listeners.onMarkers?.(data(event)));
       // EventSource reconnects by itself; report the gap meanwhile.
