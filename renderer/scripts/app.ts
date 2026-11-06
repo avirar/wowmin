@@ -8594,7 +8594,7 @@ function drawTramCarMarker(
   ctx.save();
   ctx.translate(point.x, point.y);
   ctx.rotate(angle);
-  ctx.scale(scale * FLAT_MARKER_SIZE, scale * FLAT_MARKER_SIZE);
+  ctx.scale(scale, scale);
   ctx.fillStyle = '#fbbf24';
   ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
   ctx.lineWidth = 1.5;
@@ -8644,7 +8644,7 @@ function drawInstanceIcStructures(
     if (!icon) continue;
     ctx.save();
     ctx.translate(origin.x, origin.y);
-    ctx.scale(scale * FLAT_MARKER_SIZE, scale * FLAT_MARKER_SIZE);
+    ctx.scale(scale, scale);
     ctx.globalAlpha = breached ? 0.85 : standing ? 1 : 0.45;
     ctx.imageSmoothingEnabled = false;
     const [cellX, cellY, cellW, cellH] = gateCell(gate.faction, breached);
@@ -8686,11 +8686,7 @@ function drawInstanceIcStructures(
 const GUNSHIP_HEADING_OFFSET = Math.PI;
 
 // The ship's height on screen at the icon size default and zoom 1.
-const GUNSHIP_MARKER_SIZE = 60;
-
-// The flat view's other structure and transport markers (the gate icons,
-// the tram cars) draw at twice their base size, so they read at map zoom.
-const FLAT_MARKER_SIZE = 2;
+const GUNSHIP_MARKER_SIZE = 30;
 
 // A gunship: the client's own airship minimap blip (Vehicle-Air-<side>, nose
 // up in the texture), pointed along the ship's travel heading, grown linearly
