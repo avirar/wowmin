@@ -97,33 +97,13 @@ export function transformBounds(local, rotation, position, scale) {
   };
 }
 
-export async function renderQuadMinimap(options) {
-  const dataDir = locateDataDir(options.source);
-  if (!dataDir) throw new Error(`No Data directory in ${options.source}`);
-  const readFile = openClientData(dataDir);
-  const catalog = (await buildMapCatalog(readFile, { mapIds: [options.map] }));
-  const entry = catalog.find((item) => item.mapId === options.map);
-  if (!entry) throw new Error(`Map ${options.map} is not in the client's Map.dbc`);
-  const mapPath = `World\\maps\\${entry.internalName}\\${entry.internalName}`;
-  const wdtBuffer = readFile(`${mapPath}.wdt`);
-  if (!wdtBuffer) throw new Error(`Missing ${mapPath}.wdt`);
-  const wdt = readWdt(wdtBuffer);
-
-  // The placements to compose: the WDT's single building for WMO-only maps,
-  // or the caller's list (the map's ADT-placed WMOs for mixed maps).
-  const placements = options.wmos?.length
-    ? options.wmos
-    : (wdt.wmo && wdt.wmoOnly ? [wdt.wmo] : null);
-  if (!placements) {
-    throw new Error(`${entry.internalName} is not a single-WMO map and no WMO placements were given; its minimap comes from tiles instead.`);
-  }
-
-  const trsBuffer = readFile('textures\\Minimap\\md5translate.trs');
-  if (!trsBuffer) throw new Error('Missing textures\\Minimap\\md5translate.trs');
-  const table = parseMd5TranslateTable(trsBuffer);
-
-  // One WMO's quad set, loaded once per file name (a placement list can
-  // carry the same WMO several times, at different placements).
+// A map's minimap quads: every placed WMO's groups tiled into the client's
+// quad grid, each with its md5translate.trs texture hash and its world
+// bounds through the placement. `placements` is the WDT's single building
+// for WMO-only maps, or the caller's ADT-placed WMOs for mixed maps. One
+// WMO's groups are loaded once per file name (a placement list can carry
+// the same WMO several times, at different placements).
+export function collectMinimapQuads({ readFile, table, placements }) {
   const wmoInfo = new Map();
   const quads = [];
   const baseNames = [];
@@ -152,6 +132,34 @@ export async function renderQuadMinimap(options) {
     }
   }
   quads.sort((left, right) => left.world.minZ + left.world.maxZ - (right.world.minZ + right.world.maxZ));
+  return { quads, baseNames };
+}
+
+export async function renderQuadMinimap(options) {
+  const dataDir = locateDataDir(options.source);
+  if (!dataDir) throw new Error(`No Data directory in ${options.source}`);
+  const readFile = openClientData(dataDir);
+  const catalog = (await buildMapCatalog(readFile, { mapIds: [options.map] }));
+  const entry = catalog.find((item) => item.mapId === options.map);
+  if (!entry) throw new Error(`Map ${options.map} is not in the client's Map.dbc`);
+  const mapPath = `World\\maps\\${entry.internalName}\\${entry.internalName}`;
+  const wdtBuffer = readFile(`${mapPath}.wdt`);
+  if (!wdtBuffer) throw new Error(`Missing ${mapPath}.wdt`);
+  const wdt = readWdt(wdtBuffer);
+
+  // The placements to compose: the WDT's single building for WMO-only maps,
+  // or the caller's list (the map's ADT-placed WMOs for mixed maps).
+  const placements = options.wmos?.length
+    ? options.wmos
+    : (wdt.wmo && wdt.wmoOnly ? [wdt.wmo] : null);
+  if (!placements) {
+    throw new Error(`${entry.internalName} is not a single-WMO map and no WMO placements were given; its minimap comes from tiles instead.`);
+  }
+
+  const trsBuffer = readFile('textures\\Minimap\\md5translate.trs');
+  if (!trsBuffer) throw new Error('Missing textures\\Minimap\\md5translate.trs');
+  const table = parseMd5TranslateTable(trsBuffer);
+  const { quads, baseNames } = collectMinimapQuads({ readFile, table, placements });
   const missing = quads.filter((quad) => !quad.hash);
   console.log(`  ${quads.length} quads computed for ${baseNames.join(', ')} (${quads.length - missing.length} in md5translate.trs)`);
   if (options.dryRun) {

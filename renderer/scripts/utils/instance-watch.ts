@@ -94,6 +94,39 @@ export function getInstanceFactionColor(teamId: number | undefined): string | nu
   return null;
 }
 
+// Isle of Conquest's six gates: the server's spawn positions (BattlegroundIC.h)
+// and the worldstate of each side of the gate: its open id carries 1 while
+// the gate is breached (destroyed), its closed id while it stands.
+export interface IcGate {
+  entry: number;
+  x: number;
+  y: number;
+  z: number;
+  // The keep the gate defends: 0 Alliance, 1 Horde.
+  faction: 0 | 1;
+  openWorldState: number;
+  closedWorldState: number;
+}
+
+export const IC_GATES: IcGate[] = [
+  { entry: 195699, x: 351.615, y: -762.75, z: 48.9162, faction: 0, openWorldState: 4324, closedWorldState: 4327 },
+  { entry: 195698, x: 351.024, y: -903.326, z: 48.9247, faction: 0, openWorldState: 4325, closedWorldState: 4326 },
+  { entry: 195700, x: 413.479, y: -833.95, z: 48.5238, faction: 0, openWorldState: 4323, closedWorldState: 4328 },
+  { entry: 195494, x: 1150.9, y: -762.606, z: 47.5077, faction: 1, openWorldState: 4322, closedWorldState: 4317 },
+  { entry: 195496, x: 1218.74, y: -851.155, z: 48.2533, faction: 1, openWorldState: 4320, closedWorldState: 4319 },
+  { entry: 195495, x: 1217.9, y: -676.948, z: 47.6341, faction: 1, openWorldState: 4321, closedWorldState: 4318 },
+];
+
+// The faction of a map's transport by its entry, for the markers the flat
+// view draws in its place of the 3D models: Isle of Conquest's gunships.
+export function getTransportFaction(mapId: number, entry: number): 0 | 1 | null {
+  if (mapId === 628) {
+    if (entry === 195121) return 0; // GO_ALLIANCE_GUNSHIP
+    if (entry === 195276) return 1; // GO_HORDE_GUNSHIP
+  }
+  return null;
+}
+
 export function getBattlegroundStatusLabel(status: number): string {
   return ['Inactive', 'Queued', 'Preparing', 'In progress', 'Complete'][status] ?? `Status ${status}`;
 }

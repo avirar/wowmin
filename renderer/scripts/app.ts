@@ -1,7 +1,7 @@
 /// <reference path="./types/window.d.ts" />
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
-import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, buildActiveInstanceSessions, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
+import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, buildActiveInstanceSessions, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getTransportFaction, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, parseInstanceSessionKey, zoomInstanceViewAt, IC_GATES, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
 import { clampIsoPitch, type CompassPoint, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getCompassDirections, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView, type SceneLighting } from './instance-scene/scene-view';
 import type { MapLights } from './utils/map-light';
@@ -7204,9 +7204,10 @@ function getActiveInstanceArt(mapId: number): ActiveInstanceArt | null {
 }
 
 // A short label for the artwork source toggle button and the map subtitle:
-// quads (the client's indoor minimap) or paper (zone map, minimap tiles,
-// dungeon floors).
+// terrain + quads (the outdoor bake), quads (the client's indoor minimap),
+// or paper (zone map, minimap tiles, dungeon floors).
 function instanceArtSourceLabel(art: ActiveInstanceArt): string {
+  if (art.source?.includes('terrain')) return 'terrain + quads';
   return art.source?.includes('quads') ? 'quads' : 'paper';
 }
 
@@ -8563,6 +8564,103 @@ function drawTramCarMarker(
   ctx.restore();
 }
 
+// The flat view's place for Isle of Conquest's structures, where the 3D
+// models stand: the six gates, in their keep's colour while they stand and
+// hollow grey once the live worldstates say they are breached, and the two
+// gunships, pointed along their heading, in their keep's colour.
+function drawInstanceIcStructures(
+  ctx: CanvasRenderingContext2D,
+  session: ActiveInstanceSession,
+  battleground: MapBattlegroundState,
+  projection: MapProjection,
+  live: boolean,
+  liveNow: number,
+): void {
+  const states = new Map(battleground.worldStates.map((state) => [state.id, state.value]));
+  for (const gate of IC_GATES) {
+    const origin = projection.worldToScreen(gate.x, gate.y, gate.z);
+    // Exactly one of the gate's two worldstates carries 1: the open id while
+    // it is breached, the closed id while it stands.
+    const breached = states.get(gate.openWorldState) === 1;
+    const standing = !breached && states.get(gate.closedWorldState) === 1;
+    const color = getInstanceFactionColor(gate.faction) ?? '#94a3b8';
+    ctx.save();
+    ctx.translate(origin.x, origin.y);
+    ctx.rotate(Math.PI / 4);
+    if (breached) {
+      // A breached gate keeps no wall: a hollow grey outline.
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-5, -5, 10, 10);
+    } else {
+      // Standing (or the state not yet polled): the keep's colour, solid
+      // once the worldstates say it stands.
+      ctx.globalAlpha = standing ? 1 : 0.45;
+      ctx.fillStyle = color;
+      ctx.fillRect(-5, -5, 10, 10);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(-5, -5, 10, 10);
+    }
+    ctx.restore();
+  }
+  // The gunships: the stream's poses while it is live, else the 1 s snapshot.
+  const ships = live
+    ? instanceLiveTransports.samples(liveNow).map((transport) => ({
+      entry: transport.entry,
+      x: transport.x,
+      y: transport.y,
+      z: transport.z,
+      yaw: transport.orientation,
+    }))
+    : instanceSnapshotTransports
+        .filter((transport) => transport.map === session.mapId && transport.instanceId === session.instanceId)
+        .map((transport) => ({
+          entry: transport.entry,
+          x: transport.position_x,
+          y: transport.position_y,
+          z: transport.position_z,
+          yaw: transport.orientation,
+        }));
+  for (const ship of ships) {
+    const faction = getTransportFaction(session.mapId, ship.entry);
+    if (faction === null) continue;
+    const origin = projection.worldToScreen(ship.x, ship.y, ship.z);
+    // Screen angle from the server heading, through the projection itself.
+    const ahead = projection.worldToScreen(ship.x + Math.cos(ship.yaw) * 10, ship.y + Math.sin(ship.yaw) * 10, ship.z);
+    drawGunshipMarker(ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x),
+      getInstanceFactionColor(faction) ?? '#94a3b8');
+  }
+}
+
+// A gunship: a hull and a superstructure, pointed along its heading.
+function drawGunshipMarker(
+  ctx: CanvasRenderingContext2D,
+  point: { x: number; y: number },
+  angle: number,
+  color: string,
+): void {
+  ctx.save();
+  ctx.translate(point.x, point.y);
+  ctx.rotate(angle);
+  ctx.fillStyle = color;
+  ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
+  ctx.lineWidth = 1.5;
+  // The hull.
+  ctx.beginPath();
+  ctx.moveTo(9, 0);
+  ctx.lineTo(-8, -4.5);
+  ctx.lineTo(-8, 4.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  // The superstructure, so the heading reads.
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.55)';
+  ctx.fillRect(-3, -3, 6, 6);
+  ctx.restore();
+}
+
 // Glides the pan towards a follow target: each frame closes part of the gap
 // (INSTANCE_FOLLOW_EASE_MS takes it most of the way), and a new target only
 // moves the destination, so a unit moving every frame is tracked smoothly.
@@ -8797,6 +8895,9 @@ function drawInstanceCanvas(followPass: boolean): void {
       : { type: 'bounds', bounds }, viewport);
     drawInstanceFlatBackground(ctx, viewport, assetImage, Boolean(profile));
     if (session.instanceId === 0) drawInstanceWatchPublicMap(ctx, session, projection);
+    else if (battleground && battleground.mapId === 628) {
+      drawInstanceIcStructures(ctx, session, battleground, projection, live, liveNow);
+    }
   }
   const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>) =>
     projection.worldToScreen(position.position_x, position.position_y, position.position_z);

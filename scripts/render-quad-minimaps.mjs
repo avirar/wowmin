@@ -30,12 +30,16 @@ import { parseMd5TranslateTable, renderQuadMinimap } from './render-quad-minimap
 // ships only placeholder minimap tiles, or none at all), so the quad art
 // becomes their main metadata. `verify` maps get an extra bounds report for
 // a spot-check against the paper art before shipping.
-// Not listed: 658 Pit of Saron (only tiny outdoor micro-WMOs) and 724 The
-// Ruby Sanctum (a single quad).
+// Not listed: 658 Pit of Saron (only tiny outdoor micro-WMOs), 724 The Ruby
+// Sanctum (a single quad), and battlegrounds 566/607 (four quads with art
+// each) and 13 (none).
 const MIXED_QUAD_MAPS = {
   129: { primary: true }, // Razorfen Downs: all paper tiles are the client's placeholder
   189: { primary: true }, // Scarlet Monastery: same placeholder tiles, four wings
+  30: {},     // Alterac Valley: fortification-wall quads only, kept as an experiment
   269: {},
+  489: {},    // Warsong Gulch: ditto
+  529: {},    // Arathi Basin: ditto
   595: {},
   600: {},
   601: {},
@@ -47,6 +51,8 @@ const MIXED_QUAD_MAPS = {
   618: { primary: true }, // Ring of Valor: no paper art deployed
   619: { verify: true }, // AHN: the only quad WMO is the Uldaman surface roof
   624: {},
+  // 628 Isle of Conquest is composed by render-terrain-composite.mjs
+  // (textured terrain bake + quads), not the quads-only pass.
   631: {},
   632: {},
   649: {},
