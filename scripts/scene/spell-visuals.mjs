@@ -177,11 +177,12 @@ export class SpellVisuals {
   }
 
   // The model file for a game object display (GameObjectDisplayInfo), or null
-  // if it has none to draw: building (WMO) objects, which the effect
-  // converter can't build, and the invisible marker models of traps.
+  // if it has none to draw: the invisible marker models of traps. `.wmo` files
+  // are building models (gates, gunships); the rest are M2 models.
   gameObjectModel(displayId) {
     const file = this.table('GameObjectDisplayInfo').get(displayId)?.string(GAMEOBJECT_MODEL_FIELD);
-    if (!file || /\.wmo$/i.test(file) || /invisible/i.test(file)) return null;
+    if (!file || /invisible/i.test(file)) return null;
+    if (/\.wmo$/i.test(file)) return this.hasFile(file) ? file : null;
     const modelName = file.replace(/\.md[xl]$/i, '.m2');
     return this.hasFile(modelName) ? modelName : null;
   }

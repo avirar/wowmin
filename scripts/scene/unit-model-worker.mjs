@@ -13,6 +13,7 @@ import { buildIconPng } from './icons.mjs';
 import { mapLights } from './lights.mjs';
 import { SpellVisuals } from './spell-visuals.mjs';
 import { buildUnitGlb, UnitData } from './unit-model.mjs';
+import { buildWmoGlb } from './wmo-model.mjs';
 
 let unitData = null;
 let spellVisuals = null;
@@ -47,7 +48,9 @@ async function build(kind, params) {
   }
   if (kind === 'gameobject') {
     const modelName = visuals().gameObjectModel(Number(params.displayId));
-    return modelName ? buildEffectGlb(data().readFile, modelName) : null;
+    if (!modelName) return null;
+    // Building models are WMOs; the rest are M2 effect models.
+    return /\.wmo$/i.test(modelName) ? buildWmoGlb(data().readFile, modelName) : buildEffectGlb(data().readFile, modelName);
   }
   if (kind === 'effect') {
     const modelName = params.areaModel !== undefined ? visuals().areaModel(Number(params.areaModel)) : visuals().effectModel(Number(params.effectId));
