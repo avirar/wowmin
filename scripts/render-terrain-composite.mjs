@@ -269,8 +269,27 @@ export function bakeTerrain({ readFile, mapPath, wdt, union, image, depth, water
         if (holes & (1 << (holeRow + colHole[col]))) continue;
         const vertexCol = colVertex[col];
         const vertexFCol = colVertexF[col];
-        const terrainHeight = (heights[vertexRow0 + vertexCol] * (1 - vertexF) + heights[vertexRow0 + vertexCol + 1] * vertexF) * (1 - vertexFCol)
-          + (heights[vertexRow1 + vertexCol] * (1 - vertexF) + heights[vertexRow1 + vertexCol + 1] * vertexF) * vertexFCol;
+        // The surface the MMap (and thus the in-game FloorZ and the
+        // minimap's render) is built from: every 4.17 x 4.17 sub-quad is
+        // four triangles fanned round its centre vertex, so the pixel's
+        // height is the barycentric blend of that centre and the two
+        // corners on its side (a plain outer-grid bilinear sits up to
+        // ~0.2 off the fan on the shores, enough to flip water/land).
+        // vertexF runs north -> south, vertexFCol east -> west.
+        const h00 = heights[vertexRow0 + vertexCol];
+        const h01 = heights[vertexRow0 + vertexCol + 1];
+        const h10 = heights[vertexRow1 + vertexCol];
+        const h11 = heights[vertexRow1 + vertexCol + 1];
+        const hC = heights[vertexRow0 + 9 + vertexCol];
+        let terrainHeight;
+        if (vertexF <= vertexFCol && vertexF <= 1 - vertexFCol)
+          terrainHeight = (1 - vertexF - vertexFCol) * h00 + (vertexFCol - vertexF) * h01 + 2 * vertexF * hC;
+        else if (vertexF >= vertexFCol && vertexF >= 1 - vertexFCol)
+          terrainHeight = (vertexF - vertexFCol) * h10 + (vertexF + vertexFCol - 1) * h11 + 2 * (1 - vertexF) * hC;
+        else if (vertexFCol >= vertexF && vertexFCol >= 1 - vertexF)
+          terrainHeight = (vertexFCol - vertexF) * h01 + (vertexF + vertexFCol - 1) * h11 + 2 * (1 - vertexFCol) * hC;
+        else
+          terrainHeight = (1 - vertexF - vertexFCol) * h00 + (vertexF - vertexFCol) * h10 + 2 * vertexFCol * hC;
         if (zBase + terrainHeight < waterLevel) continue;
         const texCol = colTex[col];
         const base = layers[0];
