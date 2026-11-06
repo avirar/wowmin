@@ -3957,6 +3957,10 @@ tbody tr:hover { background: var(--tint-accent-05); }
 #instance-trails-btn[aria-pressed="true"],
 #instance-decisions-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 #instance-models-btn[aria-pressed="true"],
+#instance-transports-btn[aria-pressed="true"],
+#instance-transports-2d-btn[aria-pressed="true"],
+#instance-structures-btn[aria-pressed="true"],
+#instance-structures-2d-btn[aria-pressed="true"],
 #instance-numbers-btn[aria-pressed="true"],
 #instance-glows-btn[aria-pressed="true"],
 #instance-circles-btn[aria-pressed="true"],

@@ -84,10 +84,11 @@ export function parseUnitModelPath(urlPath: string): UnitModelRequest | null {
   if (light) return { kind: 'light', key: light[1], params: { mapId: Number(light[1]) } };
   const gameObject = urlPath.match(/^\/assets\/models\/gameobject\/(\d{1,7})\.glb$/);
   if (gameObject) return { kind: 'gameobject', key: gameObject[1], params: { displayId: Number(gameObject[1]) } };
-  const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|spell-(\d{1,7})|marker-([1-8])|chain-(\d{1,7}))\.png$/);
+  const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|vehicle-(alliance|horde)|spell-(\d{1,7})|marker-([1-8])|chain-(\d{1,7})|(poi))\.png$/);
   if (icon) {
-    const params = icon[2] ? { faction: icon[2] } : icon[4] ? { marker: Number(icon[4]) }
-      : icon[5] ? { chain: Number(icon[5]) } : { spellId: Number(icon[3]) };
+    const params = icon[2] ? { faction: icon[2] } : icon[3] ? { vehicle: icon[3] }
+      : icon[5] ? { marker: Number(icon[5]) } : icon[6] ? { chain: Number(icon[6]) }
+      : icon[7] ? { poi: 1 } : { spellId: Number(icon[4]) };
     return { kind: 'icon', key: icon[1], params };
   }
   const character = urlPath.match(/^\/assets\/models\/character\/([0-9][0-9.-]{0,199})\.glb$/);

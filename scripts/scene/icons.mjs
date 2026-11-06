@@ -12,6 +12,13 @@ const FACTION_ICONS = {
   alliance: 'Interface\\TargetingFrame\\UI-PVP-Alliance.blp',
   horde: 'Interface\\TargetingFrame\\UI-PVP-Horde.blp',
 };
+// The client's airship minimap blips (MinimapFrame's vehicle-air horde and
+// alliance), nose up in the texture: the flat view draws them as the gunship
+// marker, rotated by the ship's travel heading.
+const VEHICLE_AIR_ICONS = {
+  alliance: 'Interface\\Minimap\\Vehicle-Air-Alliance.blp',
+  horde: 'Interface\\Minimap\\Vehicle-Air-Horde.blp',
+};
 const SPELL_ICON_FIELD = 133;
 const ICON_PATH_FIELD = 1;
 const ICON_MAX_SIZE = 64;
@@ -20,12 +27,19 @@ const CHAIN_TEXTURE_MAX_SIZE = 256;
 const VISIBLE_ALPHA = 20;
 
 // The icon's BLP path, whether to crop its padding, and its largest edge,
-// for a request's params ({ faction }, { marker }, { chain }, or
-// { spellId }); null if there is none.
+// for a request's params ({ faction }, { vehicle }, { marker }, { chain },
+// { poi }, or { spellId }); null if there is none.
 export function iconSource(params, tables) {
   if (params.chain) {
     const file = tables.chainTexture(Number(params.chain));
     return file ? { path: file, crop: false, maxSize: CHAIN_TEXTURE_MAX_SIZE } : null;
+  }
+  // The battleground map's POI atlas (keeps, towers, walls), served whole at
+  // its native size: the viewer crops cells from it.
+  if (params.poi) return { path: 'Interface\\Minimap\\POIIcons.blp', crop: false, maxSize: 256 };
+  if (params.vehicle) {
+    const file = VEHICLE_AIR_ICONS[params.vehicle];
+    return file ? { path: file, crop: true, maxSize: 64 } : null;
   }
   if (params.faction) return FACTION_ICONS[params.faction] ? { path: FACTION_ICONS[params.faction], crop: true } : null;
   if (params.marker) {

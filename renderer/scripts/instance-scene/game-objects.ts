@@ -17,6 +17,9 @@ export interface GameObjectPose {
   // Turn about Z, in radians.
   yaw: number;
   scale: number;
+  // A landmark (a transport: gunship, tram car, elevator) draws wherever the
+  // server puts it, skipping the party's fade, like the flat map's markers.
+  landmark?: boolean;
 }
 
 const PARTICLE_BUDGET = 3000;
@@ -29,7 +32,7 @@ export class GameObjectLayer {
 
   // `groundBelow` finds the ground for particles that start on it.
   constructor(onLoaded: () => void, private readonly groundBelow: EffectView['ground'] = null) {
-    this.templates = new EffectTemplateCache(onLoaded);
+    this.templates = new EffectTemplateCache(onLoaded, 'gameobject model');
     useServerAxes(this.group);
   }
 

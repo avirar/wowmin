@@ -339,6 +339,11 @@ test('parses model URLs into build requests, rejecting anything else', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/icon/faction-horde.png'))),
     { kind: 'icon', key: 'faction-horde', params: { faction: 'horde' } });
   assert.equal(parseUnitModelPath('/assets/models/icon/faction-scourge.png'), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/icon/vehicle-horde.png'))),
+    { kind: 'icon', key: 'vehicle-horde', params: { vehicle: 'horde' } });
+  assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/icon/vehicle-alliance.png'))),
+    { kind: 'icon', key: 'vehicle-alliance', params: { vehicle: 'alliance' } });
+  assert.equal(parseUnitModelPath('/assets/models/icon/vehicle-boat.png'), null);
   assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/icon/marker-8.png'))),
     { kind: 'icon', key: 'marker-8', params: { marker: 8 } });
   assert.equal(parseUnitModelPath('/assets/models/icon/marker-9.png'), null);

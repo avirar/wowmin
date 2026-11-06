@@ -1049,11 +1049,12 @@ export class InstanceSceneView {
   }
 
   // Places the game objects for the next render, leaving out those the
-  // last frame's fade or reach cut hides; returns how many are drawn.
+  // last frame's fade or reach cut hides — landmarks (transports) excepted:
+  // they draw wherever the server puts them; returns how many are drawn.
   setGameObjects(poses: GameObjectPose[], now: number): number {
     if (this.lost) return 0;
     const fade = this.lastFade;
-    const shown = fade ? poses.filter(({ position }) => isDrawnAt(position, fade)) : poses;
+    const shown = fade ? poses.filter(({ position, landmark }) => landmark || isDrawnAt(position, fade)) : poses;
     this.groundRays = 0;
     this.gameObjects.update(shown, now, this.camera);
     return this.gameObjects.count;

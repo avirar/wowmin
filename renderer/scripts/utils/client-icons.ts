@@ -1,6 +1,8 @@
 // Icons from the client, loaded once each from the web server
 // (assets/models/icon/<key>.png, built from WOWMIN_CLIENT_DATA): a spell's
-// (`spell-<id>`) or a side's PvP crest (`faction-alliance`, `faction-horde`).
+// (`spell-<id>`), a side's PvP crest (`faction-alliance`, `faction-horde`),
+// the minimap POI atlas (`poi`), and the airship minimap blips
+// (`vehicle-alliance`, `vehicle-horde`).
 
 const RETRY_MS = 60_000;
 

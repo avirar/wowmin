@@ -6602,7 +6602,9 @@ const $instanceObjectLightsBtn = $<HTMLButtonElement>('instance-object-lights-bt
 const $instanceDecisionsBtn = $<HTMLButtonElement>('instance-decisions-btn');
 const $instanceModelsBtn = $<HTMLButtonElement>('instance-models-btn');
 const $instanceTransportsBtn = $<HTMLButtonElement>('instance-transports-btn');
+const $instanceTransports2dBtn = $<HTMLButtonElement>('instance-transports-2d-btn');
 const $instanceStructuresBtn = $<HTMLButtonElement>('instance-structures-btn');
+const $instanceStructures2dBtn = $<HTMLButtonElement>('instance-structures-2d-btn');
 const $instanceNumbersBtn = $<HTMLButtonElement>('instance-numbers-btn');
 const $instanceGlowsBtn = $<HTMLButtonElement>('instance-glows-btn');
 const $instanceCirclesBtn = $<HTMLButtonElement>('instance-circles-btn');
@@ -7402,9 +7404,13 @@ function setInstanceShowModels(enabled: boolean): void {
   renderInstanceCanvas();
 }
 
+// Both buttons drive one setting: the transports (3D models and flat-view
+// markers) and the structures (3D models and the flat-view gate icons) show
+// in both views at once.
 function setInstanceShowTransports(enabled: boolean): void {
   instanceShowTransports = enabled;
   $instanceTransportsBtn?.setAttribute('aria-pressed', String(enabled));
+  $instanceTransports2dBtn?.setAttribute('aria-pressed', String(enabled));
   storeSetting(INSTANCE_TRANSPORTS_STORAGE_KEY, String(enabled));
   renderInstanceCanvas();
 }
@@ -7412,6 +7418,7 @@ function setInstanceShowTransports(enabled: boolean): void {
 function setInstanceShowStructures(enabled: boolean): void {
   instanceShowStructures = enabled;
   $instanceStructuresBtn?.setAttribute('aria-pressed', String(enabled));
+  $instanceStructures2dBtn?.setAttribute('aria-pressed', String(enabled));
   storeSetting(INSTANCE_STRUCTURES_STORAGE_KEY, String(enabled));
   renderInstanceCanvas();
 }
@@ -7548,6 +7555,7 @@ function getInstanceTransportPoses(now: number): GameObjectPose[] {
     position: [transport.x, transport.y, transport.z] as Point3,
     yaw: transport.orientation,
     scale: 1,
+    landmark: true,
   }));
 }
 
@@ -7564,6 +7572,7 @@ function getInstanceSnapshotTransportPoses(mapId: number, instanceId: number): G
       position: [transport.position_x, transport.position_y, transport.position_z] as Point3,
       yaw: transport.orientation,
       scale: 1,
+      landmark: true,
     }));
 }
 
@@ -8077,6 +8086,10 @@ function setInstanceView3d(enabled: boolean): void {
   for (const control of document.querySelectorAll<HTMLElement>('.instance-3d-control')) {
     control.classList.toggle('hidden', !enabled);
   }
+  // The flat-view-only controls mirror them: shown while the 3D view is off.
+  for (const control of document.querySelectorAll<HTMLElement>('.instance-flat-control')) {
+    control.classList.toggle('hidden', enabled);
+  }
   setInstanceViewTransform({ zoom: 1, panX: 0, panY: 0 });
   renderInstanceWatcher();
 }
@@ -8556,6 +8569,7 @@ function drawInstanceWatchPublicMap(
   session: ActiveInstanceSession,
   projection: MapProjection,
 ): void {
+  if (!instanceShowTransports) return;
   for (const transport of instanceSnapshotTransports) {
     if (transport.map !== session.mapId || transport.instanceId !== 0) continue;
     const origin = projection.worldToScreen(transport.position_x, transport.position_y, transport.position_z);
@@ -8578,6 +8592,7 @@ function drawTramCarMarker(
   ctx.save();
   ctx.translate(point.x, point.y);
   ctx.rotate(angle);
+  ctx.scale(playerIconScale, playerIconScale);
   ctx.fillStyle = '#fbbf24';
   ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
   ctx.lineWidth = 1.5;
@@ -8604,35 +8619,37 @@ function drawInstanceIcStructures(
   liveNow: number,
 ): void {
   const states = new Map(battleground.worldStates.map((state) => [state.id, state.value]));
+  if (!instanceShowTransports && !instanceShowStructures) return;
+  // The client battleground map's keep-wall icons (Interface\Minimap\POIIcons,
+  // served whole as icon/poi.png): the standing walls carry the keep's faction
+  // colour, the grey one stands for keeps whose side isn't known, and the
+  // broken wall is the breached gate. Cells are the atlas rectangles.
+  const gateCell = (faction: number, breached: boolean): [number, number, number, number] => {
+    if (breached) return [91, 94, 16, 13];
+    if (faction === 0) return [181, 92, 16, 15];
+    if (faction === 1) return [127, 92, 16, 15];
+    return [73, 92, 16, 15];
+  };
   for (const gate of IC_GATES) {
+    if (!instanceShowStructures) continue;
     const origin = projection.worldToScreen(gate.x, gate.y, gate.z);
     // Exactly one of the gate's two worldstates carries 1: the open id while
     // it is breached, the closed id while it stands.
     const breached = states.get(gate.openWorldState) === 1;
     const standing = !breached && states.get(gate.closedWorldState) === 1;
-    const color = getInstanceFactionColor(gate.faction) ?? '#94a3b8';
+    const icon = instanceClientIcons.get('poi');
+    if (!icon) continue;
     ctx.save();
     ctx.translate(origin.x, origin.y);
-    ctx.rotate(Math.PI / 4);
-    if (breached) {
-      // A breached gate keeps no wall: a hollow grey outline.
-      ctx.strokeStyle = '#94a3b8';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-5, -5, 10, 10);
-    } else {
-      // Standing (or the state not yet polled): the keep's colour, solid
-      // once the worldstates say it stands.
-      ctx.globalAlpha = standing ? 1 : 0.45;
-      ctx.fillStyle = color;
-      ctx.fillRect(-5, -5, 10, 10);
-      ctx.globalAlpha = 1;
-      ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(-5, -5, 10, 10);
-    }
+    ctx.scale(playerIconScale, playerIconScale);
+    ctx.globalAlpha = breached ? 0.85 : standing ? 1 : 0.45;
+    ctx.imageSmoothingEnabled = false;
+    const [cellX, cellY, cellW, cellH] = gateCell(gate.faction, breached);
+    ctx.drawImage(icon, cellX, cellY, cellW, cellH, -cellW / 2, -cellH / 2, cellW, cellH);
     ctx.restore();
   }
   // The gunships: the stream's poses while it is live, else the 1 s snapshot.
+  if (!instanceShowTransports) return;
   const ships = live
     ? instanceLiveTransports.samples(liveNow).map((transport) => ({
       entry: transport.entry,
@@ -8656,35 +8673,37 @@ function drawInstanceIcStructures(
     const origin = projection.worldToScreen(ship.x, ship.y, ship.z);
     // Screen angle from the server heading, through the projection itself.
     const ahead = projection.worldToScreen(ship.x + Math.cos(ship.yaw) * 10, ship.y + Math.sin(ship.yaw) * 10, ship.z);
-    drawGunshipMarker(ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x),
-      getInstanceFactionColor(faction) ?? '#94a3b8');
+    drawGunshipMarker(ctx, origin,
+      Math.atan2(ahead.y - origin.y, ahead.x - origin.x) + GUNSHIP_HEADING_OFFSET, faction);
   }
 }
 
-// A gunship: a hull and a superstructure, pointed along its heading.
+// The gunship WMOs' nose faces opposite the streamed transport orientation,
+// so the marker turns by half a turn to point the way the ship travels.
+const GUNSHIP_HEADING_OFFSET = Math.PI;
+
+// The ship's height on screen at the icon size default.
+const GUNSHIP_MARKER_SIZE = 30;
+
+// A gunship: the client's own airship minimap blip (Vehicle-Air-<side>, nose
+// up in the texture), pointed along the ship's travel heading, in the icon
+// size setting's scale.
 function drawGunshipMarker(
   ctx: CanvasRenderingContext2D,
   point: { x: number; y: number },
   angle: number,
-  color: string,
+  faction: 0 | 1,
 ): void {
+  // The blip stands in for the 3D model until its image has loaded.
+  const image = instanceClientIcons.get(faction === 0 ? 'vehicle-alliance' : 'vehicle-horde');
+  if (!image) return;
+  const height = GUNSHIP_MARKER_SIZE * playerIconScale;
+  const width = (image.naturalWidth / image.naturalHeight) * height;
   ctx.save();
   ctx.translate(point.x, point.y);
-  ctx.rotate(angle);
-  ctx.fillStyle = color;
-  ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
-  ctx.lineWidth = 1.5;
-  // The hull.
-  ctx.beginPath();
-  ctx.moveTo(9, 0);
-  ctx.lineTo(-8, -4.5);
-  ctx.lineTo(-8, 4.5);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-  // The superstructure, so the heading reads.
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.55)';
-  ctx.fillRect(-3, -3, 6, 6);
+  // The blip's nose faces up: a quarter turn more than the travel heading.
+  ctx.rotate(angle + Math.PI / 2);
+  ctx.drawImage(image, -width / 2, -height / 2, width, height);
   ctx.restore();
 }
 
@@ -9770,6 +9789,9 @@ $instanceArtSourceBtn?.addEventListener('click', () => {
 for (const control of document.querySelectorAll<HTMLElement>('.instance-3d-control')) {
   control.classList.toggle('hidden', !instanceView3d);
 }
+for (const control of document.querySelectorAll<HTMLElement>('.instance-flat-control')) {
+  control.classList.toggle('hidden', instanceView3d);
+}
 
 async function syncSessionRecordingToggle(): Promise<void> {
   if (!$instanceRecordSessions) return;
@@ -9809,8 +9831,12 @@ $instanceModelsBtn?.setAttribute('aria-pressed', String(instanceShowModels));
 $instanceModelsBtn?.addEventListener('click', () => setInstanceShowModels(!instanceShowModels));
 $instanceTransportsBtn?.setAttribute('aria-pressed', String(instanceShowTransports));
 $instanceTransportsBtn?.addEventListener('click', () => setInstanceShowTransports(!instanceShowTransports));
+$instanceTransports2dBtn?.setAttribute('aria-pressed', String(instanceShowTransports));
+$instanceTransports2dBtn?.addEventListener('click', () => setInstanceShowTransports(!instanceShowTransports));
 $instanceStructuresBtn?.setAttribute('aria-pressed', String(instanceShowStructures));
 $instanceStructuresBtn?.addEventListener('click', () => setInstanceShowStructures(!instanceShowStructures));
+$instanceStructures2dBtn?.setAttribute('aria-pressed', String(instanceShowStructures));
+$instanceStructures2dBtn?.addEventListener('click', () => setInstanceShowStructures(!instanceShowStructures));
 $instanceNumbersBtn?.setAttribute('aria-pressed', String(instanceShowNumbers));
 $instanceNumbersBtn?.addEventListener('click', () => setInstanceShowNumbers(!instanceShowNumbers));
 $instanceGlowsBtn?.setAttribute('aria-pressed', String(instanceShowGlows));
