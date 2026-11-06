@@ -160,6 +160,16 @@ export function loadWmo(rootName, readFile) {
     const positions = group.vertices ?? new Float32Array(0);
     const vertexCount = positions.length / 3;
     const batches = group.batches ?? [];
+    // MOVI stores the level0 (full) and level1 (LOD) index lists back to
+    // back with no counts, and the library hands us both. The render batches
+    // describe level0 exactly, so anything past the last batch's end is LOD1:
+    // unbatched, it would render with a default material and z-fight the
+    // real surface (the client only draws it as a distance LOD).
+    const level0IndexCount = batches.reduce((max, batch) => Math.max(max, batch.indexStart + batch.indexCount), 0);
+    const rawIndices = group.indices ?? new Uint16Array(0);
+    const indices = batches.length === 0 || rawIndices.length <= level0IndexCount
+      ? rawIndices
+      : rawIndices.subarray(0, level0IndexCount);
     const rawColors = header.flags & WMO_GROUP_FLAG_VERTEX_COLORS && group.colors?.length === vertexCount * 4
       ? group.colors
       : null;
@@ -175,7 +185,7 @@ export function loadWmo(rootName, readFile) {
       colors: rawColors && !(root.flags & WMO_ROOT_FLAG_VERTEX_COLORS_FIXED)
         ? fixVertexColors(rawColors, batches, header.transBatchCount)
         : rawColors,
-      indices: group.indices ?? new Uint16Array(0),
+      indices,
       liquid: readWmoLiquid(buffer),
       batches: vertexCount ? batches.map((batch) => ({
         indexStart: batch.indexStart,

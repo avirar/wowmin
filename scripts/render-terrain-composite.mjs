@@ -36,7 +36,7 @@ import { isPlaceholderArea, isPlaceholderChunk, loadMapArea, WDT_FLAG_BIG_ALPHA 
 import { mapLiquidColours } from './scene/liquids.mjs';
 import { pasteQuad, quadImageRect } from './scene/quad-minimap.mjs';
 import { collectMinimapQuads, parseMd5TranslateTable } from './render-quad-minimap.mjs';
-import { renderWmoTopDown, wmoPlacementBounds } from './scene/wmo-topdown.mjs';
+import { renderWmoTopDown, shadeFromNormal, wmoPlacementBounds } from './scene/wmo-topdown.mjs';
 
 const SCALE = 1; // 1 image px per world unit.
 const WMO_TEXTURE_MAX = 512;
@@ -315,6 +315,39 @@ export function bakeTerrain({ readFile, mapPath, wdt, union, image, depth, water
   return { chunks: baked, skipped, landPixels };
 }
 
+// Lambert-shades the baked terrain under the same fixed light as the WMO
+// pass: the surface normal comes from the baked height's two-unit central
+// differences, so cliffs and the 1-px coastline jaggies darken the way the
+// in-game minimap's shaded render does (a flat surface stays near full
+// brightness). Water pixels sit at the water level in `depth` and keep the
+// flat ocean colour.
+function shadeTerrainBake({ width, height, pixels, depth, waterLevel }) {
+  let shaded = 0;
+  for (let row = 0; row < height; row += 1) {
+    const base = row * width;
+    for (let col = 0; col < width; col += 1) {
+      const p = base + col;
+      const h = depth[p];
+      if (!(h > waterLevel)) continue;
+      // One row down is one world unit south (x - 1); one column right is
+      // one unit west (y - 1).
+      const hNorth = row > 0 ? depth[p - width] : h;
+      const hSouth = row < height - 1 ? depth[p + width] : h;
+      const hEast = col > 0 ? depth[p - 1] : h;
+      const hWest = col < width - 1 ? depth[p + 1] : h;
+      const dx = (hNorth - hSouth) * 0.5; // dh/dx
+      const dy = (hEast - hWest) * 0.5;   // dh/dy
+      shaded += 1;
+      const at = p * 4;
+      const shade = shadeFromNormal(-dx, -dy, 1);
+      pixels[at] = pixels[at] * shade;
+      pixels[at + 1] = pixels[at + 1] * shade;
+      pixels[at + 2] = pixels[at + 2] * shade;
+    }
+  }
+  return shaded;
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (!options.source) throw new Error('Missing required --source argument.');
@@ -411,6 +444,8 @@ async function main() {
   if (!wdt.wmoOnly) {
     const stats = bakeTerrain({ readFile, mapPath, wdt, union, image, depth, waterLevel: options.waterLevel });
     console.log(`  terrain: ${stats.chunks} chunks (${stats.skipped} placeholder/layerless skipped), ${(100 * stats.landPixels / (width * height)).toFixed(1)}% land`);
+    const shaded = shadeTerrainBake({ width, height, pixels: image.pixels, depth, waterLevel: options.waterLevel });
+    console.log(`  shaded ${shaded} land pixels (fixed directional light)`);
   }
   if (options.dryRun) return;
 

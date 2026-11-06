@@ -19,6 +19,28 @@ import { groupFileName, loadWmo, WMO_MATERIAL_FLAG_CLAMP_S, WMO_MATERIAL_FLAG_CL
 // later writer keeps the pixel (a building's floor drawn on the terrain).
 const DEPTH_EPSILON = 0.01;
 const NO_TEXTURE_COLOUR = 127;
+
+// The fixed bake light: a unit vector from the north-east (the image's
+// upper-left, since row = maxX - x and col = maxY - y), slightly below the
+// straight-down axis. Unlit rasterization lets the mesh's own per-triangle
+// UV patchwork and the heightfield's 1-px cliff jaggies read through; the
+// in-game minimap hides them behind its shaded render, so both the WMO and
+// terrain passes shade with this light (see shadeFromNormal).
+const LIGHT_X = 0.3015;
+const LIGHT_Y = 0.3015;
+const LIGHT_Z = 0.9045;
+const SHADE_AMBIENT = 0.45;
+const SHADE_DIFFUSE = 0.55;
+
+// Lambert shade in [0..1] for the face normal (nx, ny, nz) under the bake
+// light, `sign` flipping the normal for double-sided faces so the upward
+// side is lit. Flat ground sits near the top of the range; steep cliffs
+// drop to the ambient floor.
+export function shadeFromNormal(nx, ny, nz, sign = 1) {
+  const ndl = (sign * (nx * LIGHT_X + ny * LIGHT_Y + nz * LIGHT_Z)) /
+    (Math.sqrt(nx * nx + ny * ny + nz * nz) || 1);
+  return ndl > 0 ? SHADE_AMBIENT + SHADE_DIFFUSE * ndl : SHADE_AMBIENT;
+}
 const WMO_BLEND_OPAQUE = 0;
 const WMO_BLEND_ALPHA_KEY = 1;
 const WMO_BLEND_ALPHA = 2;
@@ -45,6 +67,22 @@ export function readWmoBounds(readFile, rootName) {
   return bounds;
 }
 
+// Optional per-pixel write analysis (used by the seam diagnostics): `analysis`
+// is { writes: Uint16Array, minDelta: Float32Array, prevZ: Float32Array }
+// over the whole image; every accepted write bumps `writes`, records the
+// smallest height step to the previous WMO writer in `minDelta`, and updates
+// `prevZ`. The depth test itself is untouched.
+function recordAnalysis(analysis, depthIndex, z) {
+  if (!analysis) return;
+  analysis.writes[depthIndex] += 1;
+  const prev = analysis.prevZ[depthIndex];
+  if (prev !== -Infinity) {
+    const delta = Math.abs(z - prev);
+    if (delta < analysis.minDelta[depthIndex]) analysis.minDelta[depthIndex] = delta;
+    analysis.prevZ[depthIndex] = z;
+  }
+}
+
 // `readWmoBounds` through one placement's transform, in world coordinates.
 export function wmoPlacementBounds(readFile, placement) {
   const { minX, minY, minZ, maxX, maxY, maxZ } = readWmoBounds(readFile, placement.name);
@@ -66,11 +104,14 @@ export function wmoPlacementBounds(readFile, placement) {
 }
 
 // The material a triangle's first vertex indexes into, per batch (a group's
-// indices run batch by batch).
+// indices run batch by batch). Triangles no batch covers (a loader handing
+// over more indices than the batches describe, e.g. a stray LOD list) are
+// left unassigned (0xFFFF) so the rasterizer skips them instead of silently
+// texturing them with material 0.
 function triangleMaterials(group) {
   if (group._triangleMaterials) return group._triangleMaterials;
   const count = group.indices.length / 3;
-  const materials = new Uint16Array(count);
+  const materials = new Uint16Array(count).fill(0xffff);
   group.batches.forEach((batch) => {
     const first = Math.floor(batch.indexStart / 3);
     const last = Math.ceil((batch.indexStart + batch.indexCount) / 3);
@@ -84,7 +125,7 @@ function triangleMaterials(group) {
 // transform the 3D scene applies: local point rotated, then translated), and
 // rasterizes its up-facing triangles over the pixels they cover, keeping the
 // topmost surface per pixel.
-function renderGroup({ group, wmo, placement, textures, image, depth, bounds, stats, placementStats }) {
+function renderGroup({ group, wmo, placement, textures, image, depth, bounds, stats, placementStats, analysis }) {
   const vertexCount = group.positions.length / 3;
   const triangleCount = group.indices.length / 3;
   if (!triangleCount) return;
@@ -125,13 +166,27 @@ function renderGroup({ group, wmo, placement, textures, image, depth, bounds, st
     // The camera looks straight down: only faces turned towards it (and the
     // double-sided ones) can be the topmost surface.
     const nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-    const material = wmo.materials[materials[triangle]];
+    const materialIndex = materials[triangle];
+    if (materialIndex === 0xffff) {
+      // No batch covers this triangle (a stray non-level0 index list): the
+      // client never draws it at this range, so leave the pixel alone.
+      continue;
+    }
+    const material = wmo.materials[materialIndex];
     const unculled = material.flags & WMO_MATERIAL_FLAG_UNCULLED;
     if (nz <= 0 && !unculled) {
       stats.culled += 1;
       if (placementStats) placementStats.culled += 1;
       continue;
     }
+
+    // Per-face Lambert shade: slopes away from the light come out darker,
+    // so a roof's slope reads as a slope instead of its raw UV patchwork.
+    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const shade = shadeFromNormal(nx, ny, nz, nz > 0 ? 1 : -1);
 
     // World point to image pixel (the terrain bake's projection).
     const r0 = bounds.maxX - ax; const c0 = bounds.maxY - ay;
@@ -196,13 +251,33 @@ function renderGroup({ group, wmo, placement, textures, image, depth, bounds, st
           else tu -= Math.floor(tu);
           if (clampT) tv = Math.max(0, Math.min(1, tv));
           else tv -= Math.floor(tv);
-          const texCol = Math.min(texture.width - 1, (tu * texture.width) | 0);
-          const texRow = Math.min(texture.height - 1, (tv * texture.height) | 0);
-          const at = ((texRow * texture.width + texCol) | 0) * 4;
-          r = texture.rgba[at];
-          g = texture.rgba[at + 1];
-          b = texture.rgba[at + 2];
-          if (alphaKey || blendAlpha) alpha = texture.rgba[at + 3];
+          // Bilinear: at 1 px/world unit a repeating texture is often
+          // undersampled, and nearest-neighbour lets the per-triangle UV
+          // patchwork read through (the client samples filtered). Wrap for
+          // repeat, clamp where the material clamps.
+          const tx = tu * texture.width;
+          const ty = tv * texture.height;
+          const x0 = Math.min(texture.width - 1, Math.floor(tx));
+          const y0 = Math.min(texture.height - 1, Math.floor(ty));
+          const x1 = clampS ? Math.min(texture.width - 1, x0 + 1) : (x0 + 1) % texture.width;
+          const y1 = clampT ? Math.min(texture.height - 1, y0 + 1) : (y0 + 1) % texture.height;
+          const fxc = tx - x0;
+          const fyc = ty - y0;
+          const rgba = texture.rgba;
+          const wa = (y0 * texture.width + x0) * 4;
+          const wb = (y0 * texture.width + x1) * 4;
+          const wc = (y1 * texture.width + x0) * 4;
+          const wd = (y1 * texture.width + x1) * 4;
+          r = (rgba[wa] * (1 - fxc) + rgba[wb] * fxc) * (1 - fyc) +
+            (rgba[wc] * (1 - fxc) + rgba[wd] * fxc) * fyc;
+          g = (rgba[wa + 1] * (1 - fxc) + rgba[wb + 1] * fxc) * (1 - fyc) +
+            (rgba[wc + 1] * (1 - fxc) + rgba[wd + 1] * fxc) * fyc;
+          b = (rgba[wa + 2] * (1 - fxc) + rgba[wb + 2] * fxc) * (1 - fyc) +
+            (rgba[wc + 2] * (1 - fxc) + rgba[wd + 2] * fxc) * fyc;
+          if (alphaKey || blendAlpha) {
+            alpha = (rgba[wa + 3] * (1 - fxc) + rgba[wb + 3] * fxc) * (1 - fyc) +
+              (rgba[wc + 3] * (1 - fxc) + rgba[wd + 3] * fxc) * fyc;
+          }
         } else if (colors) {
           const va = indices[triangle * 3];
           const vb = indices[triangle * 3 + 1];
@@ -214,6 +289,9 @@ function renderGroup({ group, wmo, placement, textures, image, depth, bounds, st
         } else {
           r = g = b = NO_TEXTURE_COLOUR;
         }
+        r *= shade;
+        g *= shade;
+        b *= shade;
         if (alphaKey && alpha <= 127) continue;
 
         const dest = depthIndex * 4;
@@ -228,6 +306,7 @@ function renderGroup({ group, wmo, placement, textures, image, depth, bounds, st
           pixels[dest + 2] = b;
         }
         if (writeDepth) depth[depthIndex] = z;
+        recordAnalysis(analysis, depthIndex, z);
         stats.pixels += 1;
         if (placementStats) placementStats.pixels += 1;
       }
@@ -242,7 +321,7 @@ function renderGroup({ group, wmo, placement, textures, image, depth, bounds, st
 // sits higher. `placements` are the map's deduplicated WMO placements (their
 // positions in server world coordinates); WMOs that fail to load are skipped
 // and counted, as the 3D scene export does.
-export function renderWmoTopDown({ placements, readFile, image, depth, bounds, textureMax = 512, perPlacement = false }) {
+export function renderWmoTopDown({ placements, readFile, image, depth, bounds, textureMax = 512, perPlacement = false, analysis = null }) {
   const stats = { wmos: 0, failed: 0, groups: 0, triangles: 0, culled: 0, rasterized: 0, pixels: 0 };
   const perPlacementStats = new Map();
   const textures = new Map();
@@ -281,7 +360,7 @@ export function renderWmoTopDown({ placements, readFile, image, depth, bounds, t
           perPlacementStats.set(placement.uniqueId, { name: placement.name, culled: 0, rasterized: 0, pixels: 0 });
         }
         renderGroup({ group, wmo, placement, textures, image, depth, bounds, stats,
-          placementStats: perPlacement ? perPlacementStats.get(placement.uniqueId) : undefined });
+          placementStats: perPlacement ? perPlacementStats.get(placement.uniqueId) : undefined, analysis });
       }
     }
   }
