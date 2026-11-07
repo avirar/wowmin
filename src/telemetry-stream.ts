@@ -3,7 +3,7 @@ import * as dgram from 'dgram';
 import type {
   StreamAppearance, StreamAppearanceUpdate, StreamAuraCategory, StreamBotDecision, StreamCombatEvent, StreamCombatEventKind,
   StreamCombatEventUpdate, StreamDebuff, StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamUnitDebuffs, StreamPassenger, StreamPassengerUpdate, StreamTransport, StreamTransportUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
-  StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus,
+  StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus, StreamVehicleBlip, StreamVehicleBlipUpdate,
 } from './types/api';
 
 // Receives the mod-wowmin-telemetry UDP position stream. A session streams only
@@ -29,6 +29,7 @@ const APPEARANCE_MAGIC = 'WMA1';
 const COMBAT_MAGIC = 'WME1';
 const UNIT_AURA_MAGIC = 'WMU1';
 const PASSENGER_MAGIC = 'WMV1';
+const VEHICLE_BLIP_MAGIC = 'WMV2';
 const GAMEOBJECT_MAGIC = 'WMG1';
 const DEBUFF_MAGIC = 'WMD1';
 const MARKER_MAGIC = 'WMR1';
@@ -38,18 +39,31 @@ const MARKER_SIZE = 8;
 const GAMEOBJECT_SIZE = 48;
 const TRANSPORT_SIZE = 36;
 const PASSENGER_SIZE = 12;
-const VERSION = 3;
+const PASSENGER_SIZE_V4 = 13;
+const VEHICLE_BLIP_SIZE = 9;
+const VERSION = 5;
 const LEGACY_VERSION = 1;
 const ROLE_MASK_VERSION = 2;
+const TAGGED_ID_VERSION = 3;
+const BLIP_VERSION = 4;
 const HEADER_SIZE = 28;
 const PLAYER_SIZE_V1 = 30;
 const PLAYER_SIZE_V2 = 31;
 
 // Version 3 keeps v2 layouts but makes non-player IDs type-tagged. Treat
 // IDs as opaque across every packet family; never strip their upper byte.
+// Version 4 adds the vehicle's minimap blip to WMV1 passengers (13-byte
+// entries); the blip is the client's s_vehicleTextures index, 0xFF = none.
+// Version 5 adds WMV2: every minimap-blipping vehicle (occupied or not) and
+// its current blip (9-byte entries); its pose is the vehicle's own creature
+// record.
 
+// v4 entries are still readable alongside v5, so a reader takes every
+// version since the tagged-ID rewrite; an unknown higher version is
+// rejected rather than misparsed.
 function supportedVersion(version: number): boolean {
-  return version === LEGACY_VERSION || version === ROLE_MASK_VERSION || version === VERSION;
+  return version === LEGACY_VERSION || version === ROLE_MASK_VERSION
+    || version === TAGGED_ID_VERSION || version === BLIP_VERSION || version === VERSION;
 }
 // Path, creature, and bot datagrams share a 24-byte header.
 const PATH_HEADER_SIZE = 24;
@@ -353,11 +367,15 @@ export function parseUnitAuraDatagram(buffer: Buffer): StreamUnitAuraUpdate | nu
 
 export function parsePassengerDatagram(buffer: Buffer): StreamPassengerUpdate | null {
   const header = readEntryHeader(buffer, PASSENGER_MAGIC);
-  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * PASSENGER_SIZE) return null;
+  if (!header) return null;
+  // Version 4 entries add the vehicle's minimap blip after the seat.
+  const size = buffer.readUInt8(4) >= BLIP_VERSION ? PASSENGER_SIZE_V4 : PASSENGER_SIZE;
+  if (buffer.length < PATH_HEADER_SIZE + header.count * size) return null;
   const passengers: StreamPassenger[] = [];
   for (let index = 0; index < header.count; index += 1) {
-    const offset = PATH_HEADER_SIZE + index * PASSENGER_SIZE;
+    const offset = PATH_HEADER_SIZE + index * size;
     const flags = buffer.readUInt8(offset + 8);
+    const blip = size === PASSENGER_SIZE_V4 ? buffer.readUInt8(offset + 10) : 0xff;
     passengers.push({
       guid: buffer.readUInt32LE(offset),
       vehicleGuid: buffer.readUInt32LE(offset + 4),
@@ -365,9 +383,23 @@ export function parsePassengerDatagram(buffer: Buffer): StreamPassengerUpdate | 
       hidden: Boolean(flags & 2),
       driver: Boolean(flags & 4),
       seat: buffer.readInt8(offset + 9),
+      blip: blip === 0xff ? undefined : blip,
     });
   }
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, passengers };
+}
+
+export function parseVehicleBlipDatagram(buffer: Buffer): StreamVehicleBlipUpdate | null {
+  const header = readEntryHeader(buffer, VEHICLE_BLIP_MAGIC);
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * VEHICLE_BLIP_SIZE) return null;
+  const vehicles: StreamVehicleBlip[] = [];
+  for (let index = 0; index < header.count; index += 1) {
+    const offset = PATH_HEADER_SIZE + index * VEHICLE_BLIP_SIZE;
+    const blip = buffer.readUInt8(offset + 4);
+    if (blip === 0xff) continue;
+    vehicles.push({ vehicleGuid: buffer.readUInt32LE(offset), blip });
+  }
+  return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, vehicles };
 }
 
 export function parseGameObjectDatagram(buffer: Buffer): StreamGameObjectUpdate | null {
@@ -528,6 +560,8 @@ const ROUTES: Record<string, Route> = {
     (listener, update) => listener.onTransports?.(update)),
   [PASSENGER_MAGIC]: route(parsePassengerDatagram, (update) => update.passengers.length > 0,
     (listener, update) => listener.onPassengers?.(update)),
+  [VEHICLE_BLIP_MAGIC]: route(parseVehicleBlipDatagram, (update) => update.vehicles.length > 0,
+    (listener, update) => listener.onVehicleBlips?.(update)),
   [UNIT_AURA_MAGIC]: route(parseUnitAuraDatagram, (update) => update.units.length > 0,
     (listener, update) => listener.onUnitAuras?.(update)),
 };

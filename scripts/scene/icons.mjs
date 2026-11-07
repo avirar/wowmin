@@ -12,12 +12,17 @@ const FACTION_ICONS = {
   alliance: 'Interface\\TargetingFrame\\UI-PVP-Alliance.blp',
   horde: 'Interface\\TargetingFrame\\UI-PVP-Horde.blp',
 };
-// The client's airship minimap blips (MinimapFrame's vehicle-air horde and
-// alliance), nose up in the texture: the flat view draws them as the gunship
-// marker, rotated by the ship's travel heading.
-const VEHICLE_AIR_ICONS = {
+// The client's minimap vehicle blips (MinimapFrame's s_vehicleTextures,
+// nose up in the texture): the faction air ships, the ground vehicles, and
+// the generic air vehicles, the occupied and unoccupied variants. The flat
+// view draws them at the vehicle's position, rotated by its heading.
+const VEHICLE_ICONS = {
   alliance: 'Interface\\Minimap\\Vehicle-Air-Alliance.blp',
   horde: 'Interface\\Minimap\\Vehicle-Air-Horde.blp',
+  ground: 'Interface\\Minimap\\Vehicle-Ground-Unoccupied.blp',
+  'ground-occupied': 'Interface\\Minimap\\Vehicle-Ground-Occupied.blp',
+  air: 'Interface\\Minimap\\Vehicle-Air-Unoccupied.blp',
+  'air-occupied': 'Interface\\Minimap\\Vehicle-Air-Occupied.blp',
 };
 const SPELL_ICON_FIELD = 133;
 const ICON_PATH_FIELD = 1;
@@ -38,7 +43,7 @@ export function iconSource(params, tables) {
   // its native size: the viewer crops cells from it.
   if (params.poi) return { path: 'Interface\\Minimap\\POIIcons.blp', crop: false, maxSize: 256 };
   if (params.vehicle) {
-    const file = VEHICLE_AIR_ICONS[params.vehicle];
+    const file = VEHICLE_ICONS[params.vehicle];
     return file ? { path: file, crop: true, maxSize: 64 } : null;
   }
   if (params.faction) return FACTION_ICONS[params.faction] ? { path: FACTION_ICONS[params.faction], crop: true } : null;

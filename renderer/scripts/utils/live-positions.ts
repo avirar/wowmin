@@ -1,6 +1,6 @@
 import type {
   MapPlayerPosition, StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
-  StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamTransport, StreamTransportUpdate, StreamUnitAuraUpdate,
+  StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamTransport, StreamTransportUpdate, StreamUnitAuraUpdate, StreamVehicleBlip, StreamVehicleBlipUpdate,
 } from '../../../src/types/api';
 
 // Buffers stream samples per player and interpolates between them, drawing a
@@ -515,6 +515,43 @@ export class LivePassengerStore {
       if (passenger?.vehicleCreature) vehicles.add(passenger.vehicleGuid);
     }
     return vehicles;
+  }
+
+  // Every fresh passenger, one entry per player.
+  all(now: number): StreamPassenger[] {
+    const fresh: StreamPassenger[] = [];
+    for (const guid of [...this.passengers.keys()]) {
+      const passenger = this.get(guid, now);
+      if (passenger) fresh.push(passenger);
+    }
+    return fresh;
+  }
+}
+
+// Every minimap-blipping vehicle arrives with each snapshot (WMV2); past
+// this without word, it has gone.
+export const LIVE_VEHICLE_BLIP_STALE_MS = 2500;
+
+// The current minimap blip of every blippable vehicle, by vehicle guid
+// (occupied or not).
+export class LiveVehicleBlipStore {
+  private readonly blips = new Map<number, { at: number; blip: number }>();
+
+  push(update: StreamVehicleBlipUpdate, receivedAt: number): void {
+    for (const vehicle of update.vehicles) this.blips.set(vehicle.vehicleGuid, { at: receivedAt, blip: vehicle.blip });
+  }
+
+  clear(): void {
+    this.blips.clear();
+  }
+
+  all(now: number): StreamVehicleBlip[] {
+    const fresh: StreamVehicleBlip[] = [];
+    for (const [guid, entry] of this.blips) {
+      if (now - entry.at > LIVE_VEHICLE_BLIP_STALE_MS) this.blips.delete(guid);
+      else fresh.push({ vehicleGuid: guid, blip: entry.blip });
+    }
+    return fresh;
   }
 }
 

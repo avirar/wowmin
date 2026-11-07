@@ -293,6 +293,7 @@ const server = createServer(async (request, response) => {
       onCombatEvents: (update) => send('combat', update),
       onUnitAuras: (update) => send('auras', update),
       onPassengers: (update) => send('passengers', update),
+      onVehicleBlips: (update) => send('vehicleblips', update),
       onGameObjects: (update) => send('gameobjects', update),
       onTransports: (update) => send('transports', update),
       onDebuffs: (update) => send('debuffs', update),

@@ -84,7 +84,7 @@ export function parseUnitModelPath(urlPath: string): UnitModelRequest | null {
   if (light) return { kind: 'light', key: light[1], params: { mapId: Number(light[1]) } };
   const gameObject = urlPath.match(/^\/assets\/models\/gameobject\/(\d{1,7})\.glb$/);
   if (gameObject) return { kind: 'gameobject', key: gameObject[1], params: { displayId: Number(gameObject[1]) } };
-  const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|vehicle-(alliance|horde)|spell-(\d{1,7})|marker-([1-8])|chain-(\d{1,7})|(poi))\.png$/);
+  const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|vehicle-(alliance|horde|ground-occupied|ground|air-occupied|air)|spell-(\d{1,7})|marker-([1-8])|chain-(\d{1,7})|(poi))\.png$/);
   if (icon) {
     const params = icon[2] ? { faction: icon[2] } : icon[3] ? { vehicle: icon[3] }
       : icon[5] ? { marker: Number(icon[5]) } : icon[6] ? { chain: Number(icon[6]) }

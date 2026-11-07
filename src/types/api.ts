@@ -398,6 +398,11 @@ export interface StreamPassenger {
   // The seat drives the vehicle.
   driver: boolean;
   seat: number;
+  // The vehicle's minimap blip, the client's s_vehicleTextures index
+  // (0 ground unoccupied, 1 ground occupied, 2 air unoccupied, 3 air
+  // occupied, 5 the horde air vehicle, 6 the alliance air vehicle).
+  // Absent when the vehicle blips nothing (or pre-version-4 streams).
+  blip?: number;
 }
 
 export interface StreamPassengerUpdate {
@@ -405,6 +410,21 @@ export interface StreamPassengerUpdate {
   instanceId: number;
   serverTimeMs: number;
   passengers: StreamPassenger[];
+}
+
+// A minimap-blipping vehicle, occupied or not (WMV2); its pose is the
+// vehicle's own creature record in the creature stream.
+export interface StreamVehicleBlip {
+  vehicleGuid: number;
+  // The client's s_vehicleTextures index (as StreamPassenger.blip).
+  blip: number;
+}
+
+export interface StreamVehicleBlipUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  vehicles: StreamVehicleBlip[];
 }
 
 // A harmful aura on a unit, for its nameplate.
@@ -512,6 +532,7 @@ export interface StreamListeners {
   onCombatEvents?: (update: StreamCombatEventUpdate) => void;
   onUnitAuras?: (update: StreamUnitAuraUpdate) => void;
   onPassengers?: (update: StreamPassengerUpdate) => void;
+  onVehicleBlips?: (update: StreamVehicleBlipUpdate) => void;
   onGameObjects?: (update: StreamGameObjectUpdate) => void;
   onTransports?: (update: StreamTransportUpdate) => void;
   onDebuffs?: (update: StreamDebuffUpdate) => void;

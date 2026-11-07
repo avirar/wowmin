@@ -3538,6 +3538,14 @@ tbody tr:hover { background: var(--tint-accent-05); }
   min-width: 36px;
 }
 
+/* The flat map's artwork (Paper/Minimap) toggle: its own cluster, top-left. */
+.instance-art-source {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 12;
+}
+
 .map-zoom-level {
   min-width: 68px !important;
   font-family: var(--font-mono);

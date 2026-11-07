@@ -21,8 +21,8 @@ function loadModule(relativePath) {
 const {
   TelemetryStream,
   parseAppearanceDatagram, parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parseDebuffDatagram,
-  parseGameObjectDatagram, parseMarkerDatagram, parsePassengerDatagram, parsePathDatagram, parseStreamDatagram,
-  parseTransportDatagram, parseUnitAuraDatagram,
+  parseGameObjectDatagram, parseMarkerDatagram, parsePassengerDatagram, parsePathDatagram,
+  parseStreamDatagram, parseTransportDatagram, parseUnitAuraDatagram, parseVehicleBlipDatagram,
 } = loadModule('../src/telemetry-stream.ts');
 const {
   LIVE_AURA_STALE_MS, LIVE_BOT_STALE_MS, LIVE_CREATURE_STALE_MS, LIVE_PATH_STALE_MS, LIVE_RENDER_DELAY_MS, LiveAuraStore, LiveBotStore,
@@ -488,21 +488,25 @@ test('looks up streamed players and creatures by guid', () => {
   assert.equal(creatures.latest(10), null);
 });
 
-// Builds a datagram as BuildPassengerDatagrams in WowMinTelemetry.cpp does.
-function passengerDatagram(passengers) {
+// Builds a datagram as BuildPassengerDatagrams in WowMinTelemetry.cpp does:
+// version 4 entries carry the vehicle's minimap blip (0xFF: none) after the
+// seat; earlier versions are 12 bytes.
+function passengerDatagram(passengers, version = 1) {
+  const size = version >= 4 ? 13 : 12;
   const header = Buffer.alloc(24);
   header.write('WMV1', 0, 'latin1');
-  header.writeUInt8(1, 4);
+  header.writeUInt8(version, 4);
   header.writeUInt32LE(603, 8);
   header.writeUInt32LE(9, 12);
   header.writeUInt32LE(5000, 16);
   header.writeUInt16LE(passengers.length, 20);
   return Buffer.concat([header, ...passengers.map((passenger) => {
-    const entry = Buffer.alloc(12);
+    const entry = Buffer.alloc(size);
     entry.writeUInt32LE(passenger.guid, 0);
     entry.writeUInt32LE(passenger.vehicle, 4);
     entry.writeUInt8(passenger.flags, 8);
     entry.writeInt8(passenger.seat, 9);
+    if (version >= 4) entry.writeUInt8(passenger.blip === undefined ? 0xff : passenger.blip, 10);
     return entry;
   })]);
 }
@@ -527,6 +531,78 @@ test('parses vehicle passengers and forgets them when they stop coming', () => {
   // Only creature vehicles are vehicles to draw.
   assert.deepEqual([...store.vehicles(1500)], [900]);
   assert.equal(store.get(1, 1000 + LIVE_PASSENGER_STALE_MS + 1), null);
+});
+
+test('parses the vehicle minimap blip from v4 passenger entries', () => {
+  const parsed = parsePassengerDatagram(passengerDatagram([
+    { guid: 1, vehicle: 0x50000007, flags: 1, seat: 0, blip: 5 },
+    { guid: 2, vehicle: 0x50000008, flags: 1, seat: 1, blip: 1 },
+    { guid: 3, vehicle: 42, flags: 0, seat: 0 },
+  ], 4));
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.passengers)), [
+    { guid: 1, vehicleGuid: 0x50000007, vehicleCreature: true, hidden: false, driver: false, seat: 0, blip: 5 },
+    { guid: 2, vehicleGuid: 0x50000008, vehicleCreature: true, hidden: false, driver: false, seat: 1, blip: 1 },
+    { guid: 3, vehicleGuid: 42, vehicleCreature: false, hidden: false, driver: false, seat: 0 },
+  ]);
+  // A truncated v4 entry (the blip byte short) is rejected.
+  const good = passengerDatagram([{ guid: 1, vehicle: 3, flags: 0, seat: 0, blip: 6 }], 4);
+  assert.equal(parsePassengerDatagram(good.subarray(0, good.length - 1)), null);
+
+  const { LivePassengerStore } = loadModule('../renderer/scripts/utils/live-positions.ts');
+  const store = new LivePassengerStore();
+  store.push(parsed, 1000);
+  assert.equal(store.get(1, 1000).blip, 5);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(store.all(1000).map((passenger) => passenger.vehicleGuid))),
+    [0x50000007, 0x50000008, 42],
+  );
+});
+
+// Builds a datagram as BuildVehicleBlipDatagrams in WowMinTelemetry.cpp
+// does: 9-byte entries (u32 guid, u8 blip, u32 reserved), one per
+// minimap-blipping vehicle, occupied or not.
+function vehicleBlipDatagram(vehicles) {
+  const header = Buffer.alloc(24);
+  header.write('WMV2', 0, 'latin1');
+  header.writeUInt8(5, 4);
+  header.writeUInt32LE(628, 8);
+  header.writeUInt32LE(4, 12);
+  header.writeUInt32LE(5000, 16);
+  header.writeUInt16LE(vehicles.length, 20);
+  return Buffer.concat([header, ...vehicles.map((vehicle) => {
+    const entry = Buffer.alloc(9);
+    entry.writeUInt32LE(vehicle.vehicle, 0);
+    entry.writeUInt8(vehicle.blip, 4);
+    return entry;
+  })]);
+}
+
+test('parses the minimap blips of occupied and unoccupied vehicles', () => {
+  const parsed = parseVehicleBlipDatagram(vehicleBlipDatagram([
+    { vehicle: 0x50000167, blip: 1 },
+    { vehicle: 0x50000168, blip: 0 },
+    { vehicle: 0x50000169, blip: 5 },
+  ]));
+  assert.equal(parsed.mapId, 628);
+  assert.equal(parsed.instanceId, 4);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.vehicles)), [
+    { vehicleGuid: 0x50000167, blip: 1 },
+    { vehicleGuid: 0x50000168, blip: 0 },
+    { vehicleGuid: 0x50000169, blip: 5 },
+  ]);
+  // A truncated entry (its reserved words short) is rejected.
+  const good = vehicleBlipDatagram([{ vehicle: 3, blip: 2 }]);
+  assert.equal(parseVehicleBlipDatagram(good.subarray(0, good.length - 1)), null);
+  // 0xFF (blips nothing) never arrives, but is skipped if it did.
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    parseVehicleBlipDatagram(vehicleBlipDatagram([{ vehicle: 9, blip: 0xff }])).vehicles)), []);
+
+  const { LiveVehicleBlipStore, LIVE_VEHICLE_BLIP_STALE_MS } = loadModule('../renderer/scripts/utils/live-positions.ts');
+  const store = new LiveVehicleBlipStore();
+  store.push(parsed, 1000);
+  assert.deepEqual(JSON.parse(JSON.stringify(store.all(1500))), JSON.parse(JSON.stringify(parsed.vehicles)));
+  // A vehicle missing from the snapshots expires after the stale time.
+  assert.equal(store.all(1000 + LIVE_VEHICLE_BLIP_STALE_MS + 1).length, 0);
 });
 
 // Builds a datagram as BuildGameObjectDatagrams in WowMinTelemetry.cpp does.
@@ -690,14 +766,14 @@ function withVersion(packet, version) {
   return copy;
 }
 
-test('accepts stream v1-v3 for every family and rejects unknown versions', () => {
+test('accepts stream v1-v5 for every family and rejects unknown versions', () => {
   const parsers = [
     ['WMP1', parsePathDatagram], ['WMC1', parseCreatureDatagram], ['WMB1', parseBotDatagram],
     ['WMA1', parseAppearanceDatagram], ['WME1', parseCombatEventDatagram], ['WMU1', parseUnitAuraDatagram],
-    ['WMV1', parsePassengerDatagram], ['WMG1', parseGameObjectDatagram], ['WMD1', parseDebuffDatagram],
-    ['WMR1', parseMarkerDatagram], ['WMT1', parseTransportDatagram],
+    ['WMV1', parsePassengerDatagram], ['WMV2', parseVehicleBlipDatagram], ['WMG1', parseGameObjectDatagram],
+    ['WMD1', parseDebuffDatagram], ['WMR1', parseMarkerDatagram], ['WMT1', parseTransportDatagram],
   ];
-  for (const version of [1, 2, 3]) {
+  for (const version of [1, 2, 3, 4, 5]) {
     const frame = parseStreamDatagram(datagram({ version, players: [tankard] }));
     assert.equal(frame.players[0].guid, tankard.guid);
     assert.equal(frame.players[0].roleMask, version >= 2 ? tankard.roleMask : undefined);
@@ -705,9 +781,9 @@ test('accepts stream v1-v3 for every family and rejects unknown versions', () =>
       assert.ok(parse(withVersion(entriesDatagram(magic, []), version)), `${magic} v${version}`);
     }
   }
-  assert.equal(parseStreamDatagram(datagram({ version: 4, players: [] })), null);
+  assert.equal(parseStreamDatagram(datagram({ version: 6, players: [] })), null);
   for (const [magic, parse] of parsers) {
-    assert.equal(parse(withVersion(entriesDatagram(magic, []), 4)), null, magic);
+    assert.equal(parse(withVersion(entriesDatagram(magic, []), 6)), null, magic);
   }
 });
 

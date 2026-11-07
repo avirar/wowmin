@@ -13,7 +13,7 @@ import {
 import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle, POWER_COLORS } from './instance-scene/nameplates';
 import { ClientIcons } from './utils/client-icons';
 import { SpellNames } from './utils/spell-names';
-import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveDebuffStore, LiveGameObjectStore, LiveMarkerStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, LiveTransportBuffer, trimPathToPosition } from './utils/live-positions';
+import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveDebuffStore, LiveGameObjectStore, LiveMarkerStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, LiveTransportBuffer, LiveVehicleBlipStore, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
@@ -6781,6 +6781,8 @@ const instanceLiveAppearances = new LiveAppearanceStore();
 const instanceLiveAuras = new LiveAuraStore();
 // Which vehicle and seat each player rides.
 const instanceLivePassengers = new LivePassengerStore();
+// The current minimap blip of every blippable vehicle, occupied or not.
+const instanceVehicleBlips = new LiveVehicleBlipStore();
 // Spawned game objects with models (battleground banners and flags, doors).
 const instanceLiveGameObjects = new LiveGameObjectStore();
 // The map's moving transports (ships, zeppelins, trams, elevators).
@@ -6893,6 +6895,7 @@ function syncInstanceLiveStream(): void {
   instanceLiveAppearances.clear();
   instanceLiveAuras.clear();
   instanceLivePassengers.clear();
+  instanceVehicleBlips.clear();
   instanceLiveGameObjects.clear();
   instanceLiveTransports.clear();
   instanceLiveDebuffs.clear();
@@ -6955,6 +6958,10 @@ function syncInstanceLiveStream(): void {
     onPassengers: (update) => {
       if (instanceLiveStream !== stream) return;
       instanceLivePassengers.push(update, performance.now());
+    },
+    onVehicleBlips: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceVehicleBlips.push(update, performance.now());
     },
     onGameObjects: (update) => {
       if (instanceLiveStream !== stream) return;
@@ -7215,12 +7222,24 @@ function getActiveInstanceArt(mapId: number): ActiveInstanceArt | null {
   };
 }
 
-// A short label for the artwork source toggle button and the map subtitle:
-// terrain + quads (the outdoor bake), quads (the client's indoor minimap),
-// or paper (zone map, minimap tiles, dungeon floors).
+// A short label for the map subtitle: terrain + quads (the outdoor bake),
+// quads (the client's indoor minimap), or paper (zone map, minimap tiles,
+// dungeon floors).
 function instanceArtSourceLabel(art: ActiveInstanceArt): string {
   if (art.source?.includes('terrain')) return 'terrain + quads';
   return art.source?.includes('quads') ? 'quads' : 'paper';
+}
+
+// The artwork toggle's label: Paper for the hand-drawn art (the zone map
+// and dungeon floors, and the bake's paper alternate), Minimap for the
+// client's minimap art (the bake, the minimap tiles, the indoor quads).
+function instanceArtSourceButtonLabel(art: ActiveInstanceArt): string {
+  const paper = art.source?.includes('paper')
+    || art.projection?.type === 'dungeonFloors'
+    // A worldMapArea art without a source is the extracted zone map; the
+    // bake's worldMapArea carries its engine source.
+    || (art.projection?.type === 'worldMapArea' && !art.source);
+  return paper ? 'Paper' : 'Minimap';
 }
 
 function clampInstanceRenderScale(scale: number): number {
@@ -8687,10 +8706,12 @@ const GUNSHIP_HEADING_OFFSET = Math.PI;
 
 // The ship's height on screen at the icon size default and zoom 1.
 const GUNSHIP_MARKER_SIZE = 30;
+// A grounded or air vehicle's blip is half the gunship's: the client's own
+// blips read smaller against the players at the same zoom.
+const VEHICLE_BLIP_MARKER_SIZE = GUNSHIP_MARKER_SIZE / 2;
 
-// A gunship: the client's own airship minimap blip (Vehicle-Air-<side>, nose
-// up in the texture), pointed along the ship's travel heading, grown linearly
-// with the zoom like the map art.
+// The ship's minimap blip (Vehicle-Air-<side>, nose up in the texture),
+// pointed along the ship's travel heading, grown on the players' icon curve.
 function drawGunshipMarker(
   ctx: CanvasRenderingContext2D,
   point: { x: number; y: number },
@@ -8699,9 +8720,22 @@ function drawGunshipMarker(
   scale: number,
 ): void {
   // The blip stands in for the 3D model until its image has loaded.
-  const image = instanceClientIcons.get(faction === 0 ? 'vehicle-alliance' : 'vehicle-horde');
+  drawVehicleBlipMarker(ctx, point, angle, faction === 0 ? 'vehicle-alliance' : 'vehicle-horde', scale, GUNSHIP_MARKER_SIZE);
+}
+
+// A vehicle's minimap blip: the client's own texture (nose up), pointed
+// along the vehicle's heading, at the caller's marker size.
+function drawVehicleBlipMarker(
+  ctx: CanvasRenderingContext2D,
+  point: { x: number; y: number },
+  angle: number,
+  iconKey: string,
+  scale: number,
+  size: number,
+): void {
+  const image = instanceClientIcons.get(iconKey);
   if (!image) return;
-  const height = GUNSHIP_MARKER_SIZE * scale;
+  const height = size * scale;
   const width = (image.naturalWidth / image.naturalHeight) * height;
   ctx.save();
   ctx.translate(point.x, point.y);
@@ -8709,6 +8743,61 @@ function drawGunshipMarker(
   ctx.rotate(angle + Math.PI / 2);
   ctx.drawImage(image, -width / 2, -height / 2, width, height);
   ctx.restore();
+}
+
+// The minimap blip's icon key, by the client's s_vehicleTextures index:
+// ground, air (each with its occupied variant), and the faction air ships.
+const VEHICLE_BLIP_ICONS: (string | null)[] = [
+  'vehicle-ground', 'vehicle-ground-occupied', 'vehicle-air', 'vehicle-air-occupied',
+  null, 'vehicle-horde', 'vehicle-alliance',
+];
+
+// A vehicle with a blip: its pose from the live stream (a creature sample
+// for a creature vehicle, the player's own sample for a player vehicle),
+// drawn as the client's blip.
+type BlippedVehiclePose = { x: number; y: number; z: number; orientation: number; alive: boolean };
+
+// The minimap blips of every blippable vehicle, occupied or not: one per
+// vehicle, at its streamed pose (its own creature record), nose up turned
+// by its heading, in its current variant. The IoC gunships keep their own
+// marker, so a vehicle whose counter a live WMT1 transport carries is not
+// blipped a second time. Follows the transports toggle; a vehicle with no
+// blip in its Vehicle.dbc row blips nothing (the server says so).
+function drawInstanceVehicleBlips(
+  ctx: CanvasRenderingContext2D,
+  projection: MapProjection,
+  liveNow: number,
+  scale: number,
+): void {
+  if (!instanceShowTransports) return;
+  const vehicles = instanceVehicleBlips.all(liveNow);
+  if (vehicles.length === 0) return;
+  const countersDrawnByTransports = new Set(
+    instanceLiveTransports.samples(liveNow).map((transport) => transport.guid),
+  );
+  const creaturesByGuid = new Map(
+    instanceLiveCreatures.samples(liveNow).map((creature) => [creature.guid, creature]),
+  );
+  const playersByGuid = new Map(
+    instanceLivePositions.samples(liveNow).map((sample) => [sample.guid, sample]),
+  );
+  for (const vehicle of vehicles) {
+    if (countersDrawnByTransports.has(vehicle.vehicleGuid & 0x00FFFFFF)) continue;
+    const iconKey = VEHICLE_BLIP_ICONS[vehicle.blip] ?? null;
+    if (!iconKey) continue;
+    const pose: BlippedVehiclePose | null =
+      creaturesByGuid.get(vehicle.vehicleGuid) ?? playersByGuid.get(vehicle.vehicleGuid) ?? null;
+    if (!pose || !pose.alive) continue;
+    const origin = projection.worldToScreen(pose.x, pose.y, pose.z);
+    // Screen angle from the server heading, through the projection itself.
+    const ahead = projection.worldToScreen(
+      pose.x + Math.cos(pose.orientation) * 10, pose.y + Math.sin(pose.orientation) * 10, pose.z,
+    );
+    drawVehicleBlipMarker(
+      ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x), iconKey, scale,
+      VEHICLE_BLIP_MARKER_SIZE,
+    );
+  }
 }
 
 // Glides the pan towards a follow target: each frame closes part of the gap
@@ -8785,6 +8874,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   if (!session) {
     if ($instanceWatchScene) $instanceWatchScene.hidden = true;
     $instanceViewControls?.classList.add('hidden');
+    if ($instanceArtSourceBtn) $instanceArtSourceBtn.hidden = true;
     renderInstanceBotCard(null, performance.now());
     return;
   }
@@ -8925,16 +9015,18 @@ function drawInstanceCanvas(followPass: boolean): void {
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
   if ($instanceWatchScene) $instanceWatchScene.hidden = !isoView;
   const hasScene = Boolean(getInstanceScene(session.mapId) && getInstanceSceneView());
-  // The artwork toggle needs the controls cluster even on maps without a 3D
-  // scene, so it stays shown then too.
   const hasArtAlternates = Boolean(loadedAsset?.metadata.alternates?.length);
-  $instanceViewControls?.classList.toggle('hidden', !hasScene && !hasArtAlternates);
-  if ($instanceRotateLeftBtn) $instanceRotateLeftBtn.disabled = !isoView;
-  if ($instanceRotateRightBtn) $instanceRotateRightBtn.disabled = !isoView;
+  // The top-right cluster is the 3D view's (scene + rotate); the artwork
+  // toggle stands alone top-left, greyed out when there is no other
+  // artwork to switch to.
+  $instanceViewControls?.classList.toggle('hidden', !hasScene);
+  if ($instanceRotateLeftBtn) $instanceRotateLeftBtn.hidden = !isoView;
+  if ($instanceRotateRightBtn) $instanceRotateRightBtn.hidden = !isoView;
   if ($instanceView3dBtn) $instanceView3dBtn.setAttribute('aria-pressed', String(instanceView3d));
   if ($instanceArtSourceBtn) {
-    $instanceArtSourceBtn.hidden = !hasArtAlternates;
-    if (hasArtAlternates && art) $instanceArtSourceBtn.textContent = instanceArtSourceLabel(art);
+    $instanceArtSourceBtn.hidden = false;
+    $instanceArtSourceBtn.disabled = !hasArtAlternates;
+    if (art) $instanceArtSourceBtn.textContent = instanceArtSourceButtonLabel(art);
   }
   $instanceCompass?.toggleAttribute('hidden', !isoView);
   if (isoView) updateInstanceCompass();
@@ -8953,15 +9045,19 @@ function drawInstanceCanvas(followPass: boolean): void {
       ? { type: 'minimapTiles', tiles: resolveMinimapTileProjection(asset) }
       : { type: 'bounds', bounds }, viewport);
     drawInstanceFlatBackground(ctx, viewport, assetImage, Boolean(profile));
-    // The structure and transport markers track the map art linearly in the
-    // zoom, like the client's minimap icons: the player icons' sqrt growth
-    // suits their small size, but it reads as the markers shrinking against
-    // the map for anything drawn at map scale.
-    const structureScale = playerIconScale * viewTransform.zoom;
+    // The structure and transport markers grow on the players' own curve
+    // (sqrt in the zoom, capped), so at every zoom and in every artwork they
+    // stay proportioned against the player markers the way the paper view
+    // reads; the earlier linear, uncapped growth let them outgrow the players
+    // once the detailed bake was zoomed in.
+    const structureScale = getCanvasPlayerIconScale(viewTransform.zoom);
     if (session.instanceId === 0) drawInstanceWatchPublicMap(ctx, session, projection, structureScale);
     else if (battleground && battleground.mapId === 628) {
       drawInstanceIcStructures(ctx, session, battleground, projection, live, liveNow, structureScale);
     }
+    // The minimap blips of every blippable vehicle, occupied or not (the
+    // gunships keep their own marker, which the blip pass dedupes against).
+    if (live) drawInstanceVehicleBlips(ctx, projection, liveNow, structureScale);
   }
   const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>) =>
     projection.worldToScreen(position.position_x, position.position_y, position.position_z);
