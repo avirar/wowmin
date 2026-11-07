@@ -606,10 +606,10 @@ test('parses the minimap blips of occupied and unoccupied vehicles', () => {
 });
 
 // Builds a datagram as BuildGameObjectDatagrams in WowMinTelemetry.cpp does.
-function gameObjectDatagram(objects) {
+function gameObjectDatagram(objects, version = 6) {
   const header = Buffer.alloc(24);
   header.write('WMG1', 0, 'latin1');
-  header.writeUInt8(1, 4);
+  header.writeUInt8(version, 4);
   header.writeUInt32LE(529, 8);
   header.writeUInt32LE(7, 12);
   header.writeUInt32LE(5000, 16);
@@ -624,19 +624,26 @@ function gameObjectDatagram(objects) {
     entry.writeUInt8(object.type, 42);
     entry.writeUInt8(object.state, 43);
     entry.writeUInt8(object.gone ? 1 : 0, 44);
+    entry.writeUInt8(object.health ?? 0, 45);
     return entry;
   })]);
 }
 
 test('parses game objects and forgets despawned ones', () => {
   const banner = { guid: 50, entry: 180058, display: 6251, x: 1166.5, y: 1200.5, z: -56.5, rotation: [0, 0, 0.5, 0.75], scale: 1, type: 1, state: 1 };
-  const parsed = parseGameObjectDatagram(gameObjectDatagram([banner, { ...banner, guid: 51, display: 6271, type: 0, state: 0 }]));
+  // An IoC gate: a destructible building with health.
+  const gate = { ...banner, guid: 51, entry: 195699, display: 6271, type: 33, state: 0, health: 42 };
+  const parsed = parseGameObjectDatagram(gameObjectDatagram([banner, gate]));
   assert.equal(parsed.mapId, 529);
   assert.deepEqual(JSON.parse(JSON.stringify(parsed.objects[0])), {
     guid: 50, entry: 180058, displayId: 6251, x: 1166.5, y: 1200.5, z: -56.5, rotation: [0, 0, 0.5, 0.75], scale: 1,
-    type: 1, state: 1, gone: false,
+    type: 1, state: 1, gone: false, healthPct: 0,
   });
   assert.equal(parsed.objects[1].state, 0);
+  // Version 6 carries the destructible building's health; the v5 module
+  // wrote its reserved byte zero, so older streams parse as undamaged.
+  assert.equal(parsed.objects[1].healthPct, 42);
+  assert.equal(parseGameObjectDatagram(gameObjectDatagram([banner], 5)).objects[0].healthPct, 0);
   const good = gameObjectDatagram([banner]);
   assert.equal(parseGameObjectDatagram(good.subarray(0, good.length - 1)), null);
 
@@ -766,14 +773,14 @@ function withVersion(packet, version) {
   return copy;
 }
 
-test('accepts stream v1-v5 for every family and rejects unknown versions', () => {
+test('accepts stream v1-v6 for every family and rejects unknown versions', () => {
   const parsers = [
     ['WMP1', parsePathDatagram], ['WMC1', parseCreatureDatagram], ['WMB1', parseBotDatagram],
     ['WMA1', parseAppearanceDatagram], ['WME1', parseCombatEventDatagram], ['WMU1', parseUnitAuraDatagram],
     ['WMV1', parsePassengerDatagram], ['WMV2', parseVehicleBlipDatagram], ['WMG1', parseGameObjectDatagram],
     ['WMD1', parseDebuffDatagram], ['WMR1', parseMarkerDatagram], ['WMT1', parseTransportDatagram],
   ];
-  for (const version of [1, 2, 3, 4, 5]) {
+  for (const version of [1, 2, 3, 4, 5, 6]) {
     const frame = parseStreamDatagram(datagram({ version, players: [tankard] }));
     assert.equal(frame.players[0].guid, tankard.guid);
     assert.equal(frame.players[0].roleMask, version >= 2 ? tankard.roleMask : undefined);
@@ -781,9 +788,9 @@ test('accepts stream v1-v5 for every family and rejects unknown versions', () =>
       assert.ok(parse(withVersion(entriesDatagram(magic, []), version)), `${magic} v${version}`);
     }
   }
-  assert.equal(parseStreamDatagram(datagram({ version: 6, players: [] })), null);
+  assert.equal(parseStreamDatagram(datagram({ version: 7, players: [] })), null);
   for (const [magic, parse] of parsers) {
-    assert.equal(parse(withVersion(entriesDatagram(magic, []), 6)), null, magic);
+    assert.equal(parse(withVersion(entriesDatagram(magic, []), 7)), null, magic);
   }
 });
 

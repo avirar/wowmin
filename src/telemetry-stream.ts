@@ -41,11 +41,15 @@ const TRANSPORT_SIZE = 36;
 const PASSENGER_SIZE = 12;
 const PASSENGER_SIZE_V4 = 13;
 const VEHICLE_BLIP_SIZE = 9;
-const VERSION = 5;
 const LEGACY_VERSION = 1;
 const ROLE_MASK_VERSION = 2;
 const TAGGED_ID_VERSION = 3;
 const BLIP_VERSION = 4;
+// Version 5 adds WMV2: every minimap-blipping vehicle and its blip.
+const VEHICLE_BLIP_VERSION = 5;
+// Version 6: the WMG1 entry's reserved byte becomes the object's health
+// percent (a destructible building's, 0 otherwise).
+const GAMEOBJECT_HEALTH_VERSION = 6;
 const HEADER_SIZE = 28;
 const PLAYER_SIZE_V1 = 30;
 const PLAYER_SIZE_V2 = 31;
@@ -58,12 +62,13 @@ const PLAYER_SIZE_V2 = 31;
 // its current blip (9-byte entries); its pose is the vehicle's own creature
 // record.
 
-// v4 entries are still readable alongside v5, so a reader takes every
-// version since the tagged-ID rewrite; an unknown higher version is
-// rejected rather than misparsed.
+// Older entries stay readable alongside the newest, so a reader takes every
+// version since the tagged-ID rewrite; an unknown higher version is rejected
+// rather than misparsed.
 function supportedVersion(version: number): boolean {
   return version === LEGACY_VERSION || version === ROLE_MASK_VERSION
-    || version === TAGGED_ID_VERSION || version === BLIP_VERSION || version === VERSION;
+    || version === TAGGED_ID_VERSION || version === BLIP_VERSION
+    || version === VEHICLE_BLIP_VERSION || version === GAMEOBJECT_HEALTH_VERSION;
 }
 // Path, creature, and bot datagrams share a 24-byte header.
 const PATH_HEADER_SIZE = 24;
@@ -421,6 +426,9 @@ export function parseGameObjectDatagram(buffer: Buffer): StreamGameObjectUpdate 
       type: buffer.readUInt8(offset + 42),
       state: buffer.readUInt8(offset + 43),
       gone: Boolean(buffer.readUInt8(offset + 44) & 1),
+      // A reserved byte before version 6 (always 0), a destructible
+      // building's health percent from it.
+      healthPct: buffer.readUInt8(offset + 45),
     });
   }
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, objects };

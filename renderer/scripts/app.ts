@@ -8628,9 +8628,22 @@ function drawTramCarMarker(
 }
 
 // The flat view's place for Isle of Conquest's structures, where the 3D
-// models stand: the six gates, in their keep's colour while they stand and
-// hollow grey once the live worldstates say they are breached, and the two
-// gunships, pointed along their heading, in their keep's colour.
+// models stand: the six gates, in their keep's colour and damage stage
+// (intact, damaged, destroyed), and the two gunships, pointed along their
+// heading, in their keep's colour.
+
+// The client's own gate icons (Interface\Minimap\POIIcons, served whole as
+// icon/poi.png): each gate's AreaPOI rows carry its intact and destroyed
+// atlas cells, and the middle cell of the triplet is the damaged stage the
+// official client never draws. Cells are atlas rectangles, row 5 of the 14
+// columns of 18-px cells with a 1-px margin: alliance 80/81/82, horde
+// 77/78/79, neutral 74/75/76, each intact/damaged/destroyed.
+const IC_GATE_ICONS = {
+  alliance: [[181, 91, 17, 17], [199, 91, 17, 17], [217, 91, 17, 17]] as [number, number, number, number][],
+  horde: [[127, 91, 17, 17], [145, 91, 17, 17], [163, 91, 17, 17]] as [number, number, number, number][],
+  unknown: [[73, 91, 17, 17], [91, 91, 17, 17], [109, 91, 17, 17]] as [number, number, number, number][],
+};
+
 function drawInstanceIcStructures(
   ctx: CanvasRenderingContext2D,
   session: ActiveInstanceSession,
@@ -8642,16 +8655,15 @@ function drawInstanceIcStructures(
 ): void {
   const states = new Map(battleground.worldStates.map((state) => [state.id, state.value]));
   if (!instanceShowTransports && !instanceShowStructures) return;
-  // The client battleground map's keep-wall icons (Interface\Minimap\POIIcons,
-  // served whole as icon/poi.png): the standing walls carry the keep's faction
-  // colour, the grey one stands for keeps whose side isn't known, and the
-  // broken wall is the breached gate. Cells are the atlas rectangles.
-  const gateCell = (faction: number, breached: boolean): [number, number, number, number] => {
-    if (breached) return [91, 94, 16, 13];
-    if (faction === 0) return [181, 92, 16, 15];
-    if (faction === 1) return [127, 92, 16, 15];
-    return [73, 92, 16, 15];
-  };
+  // The gates' damage, by the streamed gameobject's health: full (or no
+  // word yet) is intact, anything below is damaged.
+  const gateHealth = new Map(
+    instanceLiveGameObjects.all(liveNow).map((object) => [object.entry, object.healthPct]),
+  );
+  const gateCells = (faction: number): [number, number, number, number][] =>
+    faction === 0 ? IC_GATE_ICONS.alliance
+      : faction === 1 ? IC_GATE_ICONS.horde
+        : IC_GATE_ICONS.unknown;
   for (const gate of IC_GATES) {
     if (!instanceShowStructures) continue;
     const origin = projection.worldToScreen(gate.x, gate.y, gate.z);
@@ -8659,6 +8671,10 @@ function drawInstanceIcStructures(
     // it is breached, the closed id while it stands.
     const breached = states.get(gate.openWorldState) === 1;
     const standing = !breached && states.get(gate.closedWorldState) === 1;
+    // The breached worldstate is destroyed; a standing gate's damage is its
+    // health. [0] intact, [1] damaged, [2] destroyed.
+    const health = gateHealth.get(gate.entry);
+    const gateState = breached ? 2 : health !== undefined && health > 0 && health < 100 ? 1 : 0;
     const icon = instanceClientIcons.get('poi');
     if (!icon) continue;
     ctx.save();
@@ -8666,7 +8682,7 @@ function drawInstanceIcStructures(
     ctx.scale(scale, scale);
     ctx.globalAlpha = breached ? 0.85 : standing ? 1 : 0.45;
     ctx.imageSmoothingEnabled = false;
-    const [cellX, cellY, cellW, cellH] = gateCell(gate.faction, breached);
+    const [cellX, cellY, cellW, cellH] = gateCells(gate.faction)[gateState];
     ctx.drawImage(icon, cellX, cellY, cellW, cellH, -cellW / 2, -cellH / 2, cellW, cellH);
     ctx.restore();
   }

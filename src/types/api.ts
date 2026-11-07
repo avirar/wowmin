@@ -485,6 +485,9 @@ export interface StreamGameObject {
   state: number;
   // Despawned: forget it.
   gone: boolean;
+  // A destructible building's health percent (0..100); 0 for objects
+  // without health. Stream version 6 onward (a reserved byte before).
+  healthPct: number;
 }
 
 export interface StreamGameObjectUpdate {
