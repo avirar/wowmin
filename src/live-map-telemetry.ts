@@ -6,6 +6,11 @@ import type {
   MapSessionEvent,
   MapTransportPassenger,
   MapTransportPosition,
+  MapWintergraspStatus,
+  MapWintergraspStructure,
+  MapWintergraspVehicle,
+  MapWorldStateValue,
+  MapWorldPvpState,
 } from './types/api';
 
 const TELEMETRY_FIELDS_V1 = 15;
@@ -23,6 +28,11 @@ const TRANSPORT_FIELDS = 16;
 // WTPA is the magic plus ten fields (transport GUID, player GUID, name, the
 // transport-local offset and orientation, seat, and the transport clock).
 const TRANSPORT_PASSENGER_FIELDS = 11;
+// Outdoor PvP state, Wintergrasp status, structures, and vehicles (v10).
+const WORLD_STATE_FIELDS = 3;
+const WINTERGRASP_FIELDS = 5;
+const WG_STRUCTURE_FIELDS = 8;
+const WG_VEHICLE_FIELDS = 9;
 const BATTLEGROUND_FIELDS = 17;
 const OBJECTIVE_FIELDS = 5;
 const INSTANCE_FIELDS = 4;
@@ -37,6 +47,7 @@ export interface LiveMapTelemetrySnapshot {
   instances: MapInstanceState[];
   deaths: MapInstanceDeath[];
   events: MapSessionEvent[];
+  worldPvp: MapWorldPvpState;
 }
 
 export function buildLiveMapTelemetryCommand(mapId?: number, instanceId?: number): string {
@@ -65,7 +76,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
   const protocolVersion = versionLines.length > 0
     ? finiteNumber(versionLines[0].slice('WMAP_VERSION|'.length))
     : 1;
-  if (![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(protocolVersion ?? 0)
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(protocolVersion ?? 0)
     || versionLines.some((line) => finiteNumber(line.slice('WMAP_VERSION|'.length)) !== protocolVersion)) {
     return null;
   }
@@ -74,6 +85,10 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
   const transports: MapTransportPosition[] = [];
   const transportsByGuid = new Map<number, MapTransportPosition>();
   const pendingTransportPassengers: { transportGuid: number; passenger: MapTransportPassenger }[] = [];
+  const worldStates: MapWorldStateValue[] = [];
+  let wintergrasp: MapWintergraspStatus | null = null;
+  const wgStructures: MapWintergraspStructure[] = [];
+  const wgVehicles: MapWintergraspVehicle[] = [];
   const battlegrounds: MapBattlegroundState[] = [];
   const instances: MapInstanceState[] = [];
   const deaths: MapInstanceDeath[] = [];
@@ -89,6 +104,9 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
   let declaredDeathCount = 0;
   let declaredEventCount = 0;
   let declaredTransportPassengerCount = 0;
+  let declaredWorldStateCount = 0;
+  let declaredWgStructureCount = 0;
+  let declaredWgVehicleCount = 0;
   let parsedObjectiveCount = 0;
   let parsedBossCount = 0;
 
@@ -99,7 +117,8 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
       if (counts.some((value) => value === null)) return null;
       // Version 9 added the transport passenger count; a 12-field v9 build
       // predates it and still sends the eight older counts.
-      if ((protocolVersion ?? 0) >= 9 && counts.length !== 9 && counts.length !== 8) return null;
+      if ((protocolVersion ?? 0) >= 10 && counts.length !== 12 && counts.length !== 9 && counts.length !== 8) return null;
+      if ((protocolVersion ?? 0) === 9 && counts.length !== 9 && counts.length !== 8) return null;
       if ((protocolVersion ?? 0) === 8 && counts.length !== 8) return null;
       if ((protocolVersion === 5 || protocolVersion === 6 || protocolVersion === 7) && counts.length !== 7) return null;
       if (protocolVersion === 4 && counts.length !== 6) return null;
@@ -118,6 +137,9 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
           declaredDeathCount = 0,
           declaredEventCount = 0,
           declaredTransportPassengerCount = 0,
+          declaredWorldStateCount = 0,
+          declaredWgStructureCount = 0,
+          declaredWgVehicleCount = 0,
         ] = counts as number[];
       } else {
         [
@@ -270,6 +292,54 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
       if (guid) transportsByGuid.set(guid, transport);
       continue;
     }
+    if (line.startsWith('WOPW|')) {
+      if ((protocolVersion ?? 0) < 10) return null;
+      const fields = line.split('|');
+      if (fields.length !== WORLD_STATE_FIELDS) return null;
+      const values = fields.slice(1).map(finiteNumber);
+      if (values.some((value) => value === null)) return null;
+      worldStates.push({ id: values[0] as number, value: values[1] as number });
+      continue;
+    }
+    if (line.startsWith('WWG|')) {
+      if ((protocolVersion ?? 0) < 10) return null;
+      const fields = line.split('|');
+      if (fields.length !== WINTERGRASP_FIELDS) return null;
+      const values = fields.slice(1).map(finiteNumber);
+      if (values.some((value) => value === null)) return null;
+      wintergrasp = {
+        active: values[0] !== 0,
+        timer: values[1] as number,
+        defender: values[2] as number,
+        attacker: values[3] as number,
+      };
+      continue;
+    }
+    if (line.startsWith('WWGO|')) {
+      if ((protocolVersion ?? 0) < 10) return null;
+      const fields = line.split('|');
+      if (fields.length !== WG_STRUCTURE_FIELDS) return null;
+      const values = fields.slice(1).map(finiteNumber);
+      if (values.some((value) => value === null)) return null;
+      wgStructures.push({
+        entry: values[0] as number, x: values[1] as number, y: values[2] as number, z: values[3] as number,
+        health: values[4] as number, maxHealth: values[5] as number, damagedNumHits: values[6] as number,
+      });
+      continue;
+    }
+    if (line.startsWith('WWGV|')) {
+      if ((protocolVersion ?? 0) < 10) return null;
+      const fields = line.split('|');
+      if (fields.length !== WG_VEHICLE_FIELDS) return null;
+      const values = fields.slice(1).map(finiteNumber);
+      if (values.some((value) => value === null)) return null;
+      wgVehicles.push({
+        guid: values[0] as number, entry: values[1] as number, x: values[2] as number, y: values[3] as number,
+        z: values[4] as number, orientation: values[5] as number, health: values[6] as number,
+        maxHealth: values[7] as number,
+      });
+      continue;
+    }
     if (line.startsWith('WTPA|')) {
       if ((protocolVersion ?? 0) < 9) return null;
       const fields = line.split('|');
@@ -391,10 +461,21 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
     || declaredBossCount !== parsedBossCount
     || declaredDeathCount !== deaths.length
     || declaredEventCount !== events.length
-    || declaredTransportPassengerCount !== pendingTransportPassengers.length) {
+    || declaredTransportPassengerCount !== pendingTransportPassengers.length
+    || declaredWorldStateCount !== worldStates.length
+    || declaredWgStructureCount !== wgStructures.length
+    || declaredWgVehicleCount !== wgVehicles.length) {
     return null;
   }
-  return { players, transports, battlegrounds, instances, deaths, events };
+  return {
+    players,
+    transports,
+    battlegrounds,
+    instances,
+    deaths,
+    events,
+    worldPvp: { states: worldStates, wintergrasp, structures: wgStructures, vehicles: wgVehicles },
+  };
 }
 
 export function parseLiveMapTelemetry(message: string): MapPlayerPosition[] | null {

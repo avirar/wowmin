@@ -23,6 +23,7 @@ import { sceneExportNotice, sceneExportStatus } from '../../src/scene-export-ver
 import { formatBattlegroundOutcome } from '../../src/session-outcome';
 import { AppState, createInitialState, PlayerInfo } from './types/state';
 import type { CreatureInfo, StreamBotDecision, StreamCreatureSample, StreamStatus, StreamVehicleBlip } from '../../src/types/api';
+import type { MapWintergraspStructure, MapWorldPvpState } from '../../src/types/api';
 import type { ConnectionProfile, DbConfig, SoapConfig, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapTransportPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/api';
 import { bindInventoryTableTooltips, formatInventoryLocation, ITEM_QUALITY_COLOR } from './inventory/wow-item-tooltip';
 
@@ -633,6 +634,7 @@ function onMainTabActivated(tabId: MainTabId): void {
 
   if (tabId === 'map') {
     preloadMapImage(state.mapSelectedContinent);
+    void loadMapWorldPois();
     if (state.mapDbConnected) void refreshMapPositions();
     requestAnimationFrame(() => renderMapCanvas());
   }
@@ -5400,6 +5402,7 @@ const $mapStatusText      = $<HTMLElement>('map-status-text');
 const $mapPlayerCount     = $<HTMLElement>('map-player-count');
 const $mapPlayerList      = $<HTMLElement>('map-player-list');
 const $mapAutoRefresh     = $<HTMLInputElement>('map-auto-refresh');
+const $mapWorldPvp        = $<HTMLInputElement>('map-world-pvp');
 const $mapFilterType      = $<HTMLSelectElement>('map-filter-type');
 const $mapLevelMin        = $<HTMLInputElement>('map-level-min');
 const $mapLevelMax        = $<HTMLInputElement>('map-level-max');
@@ -5429,6 +5432,36 @@ const mapImageCache = new Map<number, HTMLImageElement | 'failed'>();
 let mapSelectedPlayerName: string | null = null;
 // The selected Live Map transport (by entry + object GUID), for the panel table.
 let mapSelectedTransportKey: string | null = null;
+// World PvP overlay: the client's own world-map POIs (AreaPOI + POIIcons)
+// for outdoor capture points, keeps, and structures, plus Wintergrasp's
+// walls/towers and siege vehicles.
+const MAP_WORLD_PVP_STORAGE_KEY = 'wowmin.mapWorldPvp';
+let mapShowWorldPvp = readStoredFlag(MAP_WORLD_PVP_STORAGE_KEY, true);
+let mapWorldPvp: MapWorldPvpState | null = null;
+interface MapWorldPoi {
+  id: number;
+  name: string;
+  map: number;
+  area: number;
+  x: number;
+  y: number;
+  z: number;
+  worldState: number;
+  icons: number[];
+}
+let mapWorldPoiTable: { iconColumns: number; iconCellPx: number; pois: MapWorldPoi[] } | null = null;
+let mapWorldPoiLoadStarted = false;
+interface MapOverlayHit {
+  key: string;
+  name: string;
+  details: string;
+  coords: string;
+  x: number;
+  y: number;
+  radius: number;
+}
+let mapOverlayHits: MapOverlayHit[] = [];
+let mapSelectedOverlayKey: string | null = null;
 let mapSelectedBotWaypoint: MapBotWaypoint | null = null;
 let mapSelectedBotWaypointLoading = false;
 let mapSelectedBotWaypointRequestToken = 0;
@@ -5534,6 +5567,22 @@ async function refreshSelectedBotWaypoint(): Promise<void> {
   mapSelectedBotWaypointLoading = false;
   renderMapCanvas();
   renderMapSelectedPanel();
+}
+
+// The client's world-map landmark table (AreaPOI.dbc bake): outdoor PvP
+// capture points, workshops, and structures, each with nine icon variants
+// chosen by a world state (scripts/extract-world-pois.mjs).
+async function loadMapWorldPois(): Promise<void> {
+  if (mapWorldPoiLoadStarted) return;
+  mapWorldPoiLoadStarted = true;
+  try {
+    const response = await fetch('assets/poi/world-pois.json');
+    if (!response.ok) return; // Not baked on this install: no overlay.
+    mapWorldPoiTable = await response.json() as { iconColumns: number; iconCellPx: number; pois: MapWorldPoi[] };
+    renderMapCanvas();
+  } catch {
+    // A missing or unreadable table simply leaves the overlay off.
+  }
 }
 
 // ── Image preloading ───────────────────────────────────────────────────────
@@ -5881,15 +5930,24 @@ async function refreshMapPositions(): Promise<void> {
       }
       mapAllPlayers = snapshot.players;
       mapAllTransports = snapshot.transports ?? [];
+      mapWorldPvp = snapshot.worldPvp ?? null;
       recordTransportZSamples();
       mapMovementStartedAt = performance.now();
       animateMapMovement();
       if ($mapStatusText) {
         const source = snapshot.source === 'worldserver' ? 'LIVE world state' : 'DB fallback (saved positions)';
         const transportCount = getMapFilteredTransports().length;
+        // The battlefield timer is milliseconds.
+        const wintergrasp = snapshot.worldPvp?.wintergrasp;
+        const wintergraspSeconds = wintergrasp ? Math.floor(wintergrasp.timer / 1000) : 0;
+        const wintergraspLabel = state.mapSelectedContinent === 571 && wintergrasp
+          ? ` • Wintergrasp ${wintergrasp.active ? 'war' : 'peace'} `
+            + `${Math.floor(wintergraspSeconds / 60)}:${String(wintergraspSeconds % 60).padStart(2, '0')}`
+          : '';
         $mapStatusText.textContent =
           `${source} • ${mapMovingPlayers.size} moving` +
           (transportCount > 0 ? ` • ${transportCount} transports` : '') +
+          wintergraspLabel +
           ` • ${new Date(snapshot.capturedAt).toLocaleTimeString()}`;
       }
     } catch {
@@ -6141,6 +6199,7 @@ function renderMapCanvas(): void {
     }
   }
   ctx.shadowBlur = 0;
+  if (mapShowWorldPvp) drawMapWorldPvp(ctx, bounds, layout, markerScale);
   ctx.restore();
 
   if (players.length === 0) {
@@ -6191,6 +6250,24 @@ function renderMapSelectedPanel(): void {
   const waypointEl = $<HTMLElement>('map-sel-waypoint');
   const tableEl   = $<HTMLElement>('map-sel-table');
   const actionsEl = panel.querySelector<HTMLElement>('.map-sel-actions');
+
+  // A selected world PvP point or Wintergrasp vehicle: name, owner/HP, and
+  // position (the player-only SOAP actions stay hidden).
+  const overlay = mapSelectedOverlayKey
+    ? mapOverlayHits.find((entry) => entry.key === mapSelectedOverlayKey) ?? null
+    : null;
+  if (!overlay && mapSelectedOverlayKey) mapSelectedOverlayKey = null;
+  if (overlay) {
+    panel.classList.remove('hidden');
+    if (nameEl) { nameEl.textContent = overlay.name; nameEl.style.color = ''; }
+    if (badgeEl) badgeEl.innerHTML = '<span class="bot-badge">WORLD PVP</span>';
+    if (detailsEl) detailsEl.textContent = overlay.details;
+    if (coordsEl) coordsEl.textContent = overlay.coords;
+    if (waypointEl) waypointEl.textContent = '';
+    if (actionsEl) actionsEl.classList.add('hidden');
+    if (tableEl) { tableEl.classList.add('hidden'); tableEl.innerHTML = ''; }
+    return;
+  }
 
   // A selected transport: route fields and the standing-passenger debug
   // table (the player-only SOAP actions stay hidden).
@@ -6297,15 +6374,28 @@ $mapCanvas?.addEventListener('click', (e) => {
   } else {
     mapSelectedTransportKey = null;
   }
-  if (hitTransport) {
+  let hitOverlay: MapOverlayHit | null = null;
+  if (!hit && !hitTransport) {
+    for (const overlay of mapOverlayHits) {
+      if (Math.hypot(mx - overlay.x, my - overlay.y) <= overlay.radius) { hitOverlay = overlay; break; }
+    }
+  }
+  if (hitOverlay) {
+    mapSelectedOverlayKey = mapSelectedOverlayKey === hitOverlay.key ? null : hitOverlay.key;
+    mapSelectedPlayerName = null;
+    mapSelectedTransportKey = null;
+  } else if (hitTransport) {
     const key = mapTransportKey(hitTransport);
     mapSelectedTransportKey = mapSelectedTransportKey === key ? null : key;
     mapSelectedPlayerName = null;
+    mapSelectedOverlayKey = null;
   } else if (!hit) {
     mapSelectedPlayerName = null;
     mapSelectedTransportKey = null;
+    mapSelectedOverlayKey = null;
   } else {
     mapSelectedPlayerName = mapSelectedPlayerName === hit.name ? null : hit.name;
+    mapSelectedOverlayKey = null;
   }
   const resultEl = $<HTMLElement>('map-action-result');
   if (resultEl) { resultEl.textContent = ''; resultEl.className = 'action-result'; }
@@ -6361,6 +6451,7 @@ $('map-selected-panel')?.addEventListener('click', async (e) => {
 $('map-deselect-btn')?.addEventListener('click', () => {
   mapSelectedPlayerName = null;
   mapSelectedTransportKey = null;
+  mapSelectedOverlayKey = null;
   clearSelectedBotWaypoint();
   renderMapCanvas();
   renderMapPlayerList();
@@ -6407,6 +6498,12 @@ $mapCanvas?.addEventListener('mousemove', (e) => {
       if (dx * dx + dy * dy < 100) { hitTransport = t; break; }
     }
   }
+  let hitOverlay: MapOverlayHit | null = null;
+  if (!hit && !hitTransport) {
+    for (const overlay of mapOverlayHits) {
+      if (Math.hypot(mx - overlay.x, my - overlay.y) <= overlay.radius) { hitOverlay = overlay; break; }
+    }
+  }
 
   if (hit) {
     $mapTooltip.classList.remove('wide');
@@ -6443,6 +6540,19 @@ $mapCanvas?.addEventListener('mousemove', (e) => {
     const ty = my - 10 < 0 ? my + 10 : my - 10;
     $mapTooltip.style.left = `${tx}px`;
     $mapTooltip.style.top  = `${ty}px`;
+    $mapTooltip.classList.remove('hidden');
+    $mapCanvas.style.cursor = 'pointer';
+  } else if (hitOverlay) {
+    $mapTooltip.classList.remove('wide');
+    $mapTooltip.innerHTML =
+      `<div class="map-tooltip-name">${escapeHtml(hitOverlay.name)}</div>` +
+      `<div>${escapeHtml(hitOverlay.details)}</div>` +
+      `<div style="color:var(--text-muted);font-size:11px">${escapeHtml(hitOverlay.coords)}</div>`;
+    const tw = 200;
+    const tx = mx + 14 + tw > W ? mx - tw - 6 : mx + 14;
+    const ty = my - 10 < 0 ? my + 10 : my - 10;
+    $mapTooltip.style.left = `${tx}px`;
+    $mapTooltip.style.top = `${ty}px`;
     $mapTooltip.classList.remove('hidden');
     $mapCanvas.style.cursor = 'pointer';
   } else {
@@ -6535,6 +6645,7 @@ $$<HTMLButtonElement>('.map-continent-btn').forEach((btn) => {
     resetMapZoom(false);
     mapSelectedPlayerName = null;
     mapSelectedTransportKey = null;
+    mapSelectedOverlayKey = null;
     clearSelectedBotWaypoint();
     mapAllPlayers = [];
     renderMapCanvas();
@@ -6552,6 +6663,12 @@ $mapZoomOutBtn?.addEventListener('click', () => zoomMap(state.mapZoom / MAP_ZOOM
 $mapZoomInBtn?.addEventListener('click', () => zoomMap(state.mapZoom * MAP_ZOOM_STEP));
 $mapZoomResetBtn?.addEventListener('click', () => resetMapZoom());
 
+if ($mapWorldPvp) $mapWorldPvp.checked = mapShowWorldPvp;
+$mapWorldPvp?.addEventListener('change', () => {
+  mapShowWorldPvp = Boolean($mapWorldPvp.checked);
+  storeSetting(MAP_WORLD_PVP_STORAGE_KEY, String(mapShowWorldPvp));
+  renderMapCanvas();
+});
 $mapAutoRefresh?.addEventListener('change', () => {
   if ($mapAutoRefresh.checked) startMapAutoRefresh(); else stopMapAutoRefresh();
 });
@@ -8838,6 +8955,101 @@ function drawTramCarMarker(
   ctx.fillStyle = 'rgba(15, 23, 42, 0.55)';
   ctx.fillRect(3, -3, 4, 6);
   ctx.restore();
+}
+
+// The Live Map's world PvP overlay: the client's own POI icons for the map's
+// outdoor capture points (Wintergrasp's workshops, towers, and walls,
+// Hellfire's towers, the Plaguelands' and other zones' points), selected by
+// the streamed world states exactly as the client does
+// (`icons[value - 1]`, skipped while the value is 0), plus Wintergrasp's
+// siege vehicles while a battle is on.
+function drawMapWorldPvp(
+  ctx: CanvasRenderingContext2D,
+  bounds: (typeof CONTINENT_BOUNDS)[number],
+  layout: ReturnType<typeof getMapRenderLayout>,
+  markerScale: number,
+): void {
+  mapOverlayHits = [];
+  const table = mapWorldPoiTable;
+  const world = mapWorldPvp;
+  if (!table || !world) return;
+  const continent = state.mapSelectedContinent;
+  const content = layout.content;
+  const values = new Map(world.states.map((entry) => [entry.id, entry.value]));
+  const icon = instanceClientIcons.get('poi');
+  // The client's POIIcons atlas layout (CGMinimapFrame::InitializeGame):
+  // 14 columns, 18 px pitch, a 1 px inset, each icon drawn 17x17.
+  const columns = 14;
+  const pitch = 18;
+  const inset = 1;
+  const cell = 17;
+  const size = 20 * markerScale;
+
+  // A Wintergrasp structure's real hit points, matched to its POI by
+  // position (the client table's wall entries sit within a couple of yards
+  // of the spawned object).
+  const structureAt = (map: number, x: number, y: number): MapWintergraspStructure | null =>
+    map === 571
+      ? world.structures.find((structure) => Math.hypot(structure.x - x, structure.y - y) < 15) ?? null
+      : null;
+  const healthLabel = (health: number, maxHealth: number): string => maxHealth > 0
+    ? `${health.toLocaleString()} / ${maxHealth.toLocaleString()} (${((health * 100) / maxHealth).toFixed(2)}%)`
+    : '';
+  // Wintergrasp's world-state values carry the owner (the core's
+  // BATTLEFIELD_WG_OBJECTSTATE_*: 1 neutral, 4 horde, 7 alliance).
+  const ownerLabel = (poi: MapWorldPoi, value: number): string => {
+    if (poi.map === 571 && poi.worldState >= 3698 && poi.worldState <= 3773) {
+      return value === 4 ? 'Horde' : value === 7 ? 'Alliance' : value === 1 ? 'Neutral' : `State ${value}`;
+    }
+    return value === 1 ? 'Active' : `State ${value}`;
+  };
+
+  if (icon) {
+    for (const poi of table.pois) {
+      if (poi.map !== continent) continue;
+      const value = values.get(poi.worldState) ?? 0;
+      // The client hides a POI while its world state is 0.
+      if (!value) continue;
+      let index = value - 1;
+      if (index < 0 || index >= 9) index = 0;
+      const iconIndex = poi.icons[index];
+      if (!iconIndex) continue;
+      const point = projectWorldToViewport({ position_x: poi.x, position_y: poi.y }, bounds, content);
+      const sourceX = (iconIndex % columns) * pitch + inset;
+      const sourceY = Math.floor(iconIndex / columns) * pitch + inset;
+      ctx.drawImage(icon, sourceX, sourceY, cell, cell,
+        point.x - size / 2, point.y - size / 2, size, size);
+      const structure = structureAt(poi.map, poi.x, poi.y);
+      mapOverlayHits.push({
+        key: `poi:${poi.id}`,
+        name: poi.name,
+        details: [ownerLabel(poi, value), structure ? `HP ${healthLabel(structure.health, structure.maxHealth)}` : '']
+          .filter(Boolean).join(' • '),
+        coords: `(${poi.x.toFixed(0)}, ${poi.y.toFixed(0)}, ${poi.z.toFixed(0)})`,
+        x: point.x,
+        y: point.y,
+        radius: size / 2 + 3,
+      });
+    }
+  }
+
+  // Wintergrasp's siege vehicles, while the battle is on.
+  if (continent === 571 && world.wintergrasp?.active) {
+    for (const vehicle of world.vehicles) {
+      const point = projectWorldToViewport({ position_x: vehicle.x, position_y: vehicle.y }, bounds, content);
+      drawGenericTransportMarker(ctx, point, vehicle.orientation, markerScale * 0.9);
+      mapOverlayHits.push({
+        key: `wgv:${vehicle.guid}`,
+        name: `Wintergrasp vehicle (entry ${vehicle.entry})`,
+        details: ['Siege vehicle', vehicle.maxHealth > 0 ? `HP ${healthLabel(vehicle.health, vehicle.maxHealth)}` : '']
+          .filter(Boolean).join(' • '),
+        coords: `(${vehicle.x.toFixed(0)}, ${vehicle.y.toFixed(0)})`,
+        x: point.x,
+        y: point.y,
+        radius: 8 * markerScale,
+      });
+    }
+  }
 }
 
 // The flat view's place for Isle of Conquest's structures, where the 3D

@@ -654,6 +654,55 @@ export interface MapTransportPosition {
   passengers: MapTransportPassenger[];
 }
 
+// An outdoor PvP world state: the client's own selector for a POI icon
+// (AreaPOI's icon[value - 1]).
+export interface MapWorldStateValue {
+  id: number;
+  value: number;
+}
+
+export interface MapWintergraspStatus {
+  // A battle is running (else the peace/queue phase).
+  active: boolean;
+  // Seconds left in the phase.
+  timer: number;
+  // 0 alliance, 1 horde.
+  defender: number;
+  attacker: number;
+}
+
+// A Wintergrasp destructible wall, tower, or door with its real hit points.
+export interface MapWintergraspStructure {
+  entry: number;
+  x: number;
+  y: number;
+  z: number;
+  health: number;
+  maxHealth: number;
+  damagedNumHits: number;
+}
+
+// A Wintergrasp siege vehicle (catapult, demolisher, siege engine, turret).
+export interface MapWintergraspVehicle {
+  guid: number;
+  entry: number;
+  x: number;
+  y: number;
+  z: number;
+  orientation: number;
+  health: number;
+  maxHealth: number;
+}
+
+// The outdoor PvP state the Live Map overlays: world states that select the
+// client's POI icons, plus Wintergrasp's battlefield and its objects.
+export interface MapWorldPvpState {
+  states: MapWorldStateValue[];
+  wintergrasp: MapWintergraspStatus | null;
+  structures: MapWintergraspStructure[];
+  vehicles: MapWintergraspVehicle[];
+}
+
 export interface MapPlayerSnapshot {
   players: MapPlayerPosition[];
   transports: MapTransportPosition[];
@@ -661,6 +710,7 @@ export interface MapPlayerSnapshot {
   instances: MapInstanceState[];
   deaths: MapInstanceDeath[];
   events: MapSessionEvent[];
+  worldPvp: MapWorldPvpState;
   source: 'worldserver' | 'database';
   capturedAt: number;
 }

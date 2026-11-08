@@ -225,6 +225,32 @@ test('rejects v8 snapshots with mismatched transport counts or stray rows', () =
   assert.equal(parseLiveMapTelemetrySnapshot(`WMAP_VERSION|7\n${transportRow}\nWMAP_END|0|0|0|0|0|0|0`), null);
 });
 
+test('parses the v10 outdoor PvP state, Wintergrasp status, structures, and vehicles', () => {
+  const message = [
+    'WMAP_VERSION|10',
+    'WOPW|3700|1',
+    'WOPW|3749|7',
+    'WWG|1|1234|0|1',
+    'WWGO|191795|5385.840|2909.490|409.713|599999|600001|600000',
+    'WWGV|4242|28094|4943.100|2390.200|400.500|1.570|45000|60000',
+    'WMAP_END|0|0|0|0|0|0|0|0|0|2|1|1',
+  ].join('\n');
+  const snapshot = parseLiveMapTelemetrySnapshot(message);
+  assert.ok(snapshot);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.worldPvp.states)), [
+    { id: 3700, value: 1 },
+    { id: 3749, value: 7 },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.worldPvp.wintergrasp)), { active: true, timer: 1234, defender: 0, attacker: 1 });
+  assert.equal(snapshot.worldPvp.structures.length, 1);
+  assert.equal(snapshot.worldPvp.structures[0].health, 599999);
+  assert.equal(snapshot.worldPvp.structures[0].maxHealth, 600001);
+  assert.equal(snapshot.worldPvp.vehicles[0].entry, 28094);
+  assert.equal(snapshot.worldPvp.vehicles[0].maxHealth, 60000);
+  // The same lines under a v9 header are malformed.
+  assert.equal(parseLiveMapTelemetrySnapshot(message.replace('WMAP_VERSION|10', 'WMAP_VERSION|9')), null);
+});
+
 test('rejects truncated snapshots', () => {
   const message = 'WMAP|Jaspianus|571|0|1|2|3|4|80|1|1|9001|1|1|0\nWMAP_END|2';
   assert.equal(parseLiveMapTelemetry(message), null);
