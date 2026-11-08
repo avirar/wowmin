@@ -6802,6 +6802,7 @@ const $instanceModelsBtn = $<HTMLButtonElement>('instance-models-btn');
 const $instanceTransportsBtn = $<HTMLButtonElement>('instance-transports-btn');
 const $instanceTransports2dBtn = $<HTMLButtonElement>('instance-transports-2d-btn');
 const $instanceStructuresBtn = $<HTMLButtonElement>('instance-structures-btn');
+const $instanceObjectivesBtn = $<HTMLButtonElement>('instance-objectives-btn');
 const $instanceStructures2dBtn = $<HTMLButtonElement>('instance-structures-2d-btn');
 const $instanceNumbersBtn = $<HTMLButtonElement>('instance-numbers-btn');
 const $instanceGlowsBtn = $<HTMLButtonElement>('instance-glows-btn');
@@ -7042,6 +7043,24 @@ let instanceShowTransports = readStoredFlag(INSTANCE_TRANSPORTS_STORAGE_KEY, tru
 // Destructible structures (IoC's gates and walls) drawn as models.
 const INSTANCE_STRUCTURES_STORAGE_KEY = 'wowmin.instanceStructures';
 let instanceShowStructures = readStoredFlag(INSTANCE_STRUCTURES_STORAGE_KEY, true);
+// Capturable objectives (IoC's quarry, refinery, docks, hangar, workshop) in
+// the flat view, with the client's own map icons.
+const INSTANCE_OBJECTIVES_STORAGE_KEY = 'wowmin.instanceObjectives';
+let instanceShowObjectives = readStoredFlag(INSTANCE_OBJECTIVES_STORAGE_KEY, true);
+// Isle of Conquest's node world states (BattlegroundIC.h): the client's POI
+// rows pair each with its map icon, and the label names the state.
+const IC_OBJECTIVE_STATES = new Map<number, string>([
+  [4294, 'Uncontrolled'], [4228, 'Contested (Alliance)'], [4293, 'Contested (Horde)'],
+  [4229, 'Controlled (Alliance)'], [4230, 'Controlled (Horde)'],
+  [4296, 'Uncontrolled'], [4300, 'Contested (Alliance)'], [4297, 'Contested (Horde)'],
+  [4299, 'Controlled (Alliance)'], [4298, 'Controlled (Horde)'],
+  [4301, 'Uncontrolled'], [4305, 'Contested (Alliance)'], [4302, 'Contested (Horde)'],
+  [4304, 'Controlled (Alliance)'], [4303, 'Controlled (Horde)'],
+  [4306, 'Uncontrolled'], [4310, 'Contested (Alliance)'], [4307, 'Contested (Horde)'],
+  [4309, 'Controlled (Alliance)'], [4308, 'Controlled (Horde)'],
+  [4311, 'Uncontrolled'], [4315, 'Contested (Alliance)'], [4312, 'Contested (Horde)'],
+  [4314, 'Controlled (Alliance)'], [4313, 'Controlled (Horde)'],
+]);
 // Casts, auras, swings, damage, and heals from the live stream, as effects.
 const instanceCombatEffects = new CombatEffectStore();
 const INSTANCE_NUMBERS_STORAGE_KEY = 'wowmin.instanceNumbers';
@@ -9271,6 +9290,58 @@ function drawInstanceIcStructures(
   }
 }
 
+// A battleground's capturable objectives (IoC's quarry, refinery, docks,
+// hangar, and workshop): the client's own POI icons, one pair per state,
+// selected by the battleground's world states exactly as the client does.
+function drawInstanceCapturePoints(
+  ctx: CanvasRenderingContext2D,
+  session: ActiveInstanceSession,
+  projection: MapProjection,
+  battleground: MapBattlegroundState | null,
+  scale: number,
+): void {
+  if (!instanceShowObjectives) return;
+  if (!mapWorldPoiTable) { void loadMapWorldPois(); return; }
+  if (!battleground) return;
+  const icon = instanceClientIcons.get('poi');
+  if (!icon) return;
+  const states = new Map(battleground.worldStates.map((state) => [state.id, state.value]));
+  const size = 22 * scale;
+  // The client's atlas (CGMinimapFrame::InitializeGame): 14 columns,
+  // 18 px pitch, 1 px inset, 17 px icons.
+  const columns = 14;
+  const pitch = 18;
+  const inset = 1;
+  const cell = 17;
+  for (const poi of mapWorldPoiTable.pois) {
+    if (poi.map !== session.mapId) continue;
+    // The gates keep their dedicated keep-wall markers, with their HP.
+    if (poi.name.includes('Gate')) continue;
+    const value = states.get(poi.worldState) ?? 0;
+    if (!value) continue;
+    let index = value - 1;
+    if (index < 0 || index >= 9) index = 0;
+    const iconIndex = poi.icons[index];
+    if (!iconIndex) continue;
+    const point = projection.worldToScreen(poi.x, poi.y, poi.z);
+    const sourceX = (iconIndex % columns) * pitch + inset;
+    const sourceY = Math.floor(iconIndex / columns) * pitch + inset;
+    ctx.drawImage(icon, sourceX, sourceY, cell, cell,
+      point.x - size / 2, point.y - size / 2, size, size);
+    instanceMarkerHitAreas.push({
+      kind: 'structure',
+      name: poi.name,
+      x: point.x,
+      y: point.y,
+      radius: size / 2 + 3,
+      details: IC_OBJECTIVE_STATES.get(poi.worldState) ?? 'Objective',
+      coords: `(${poi.x.toFixed(0)}, ${poi.y.toFixed(0)})`,
+      isPlayer: false,
+      isBot: false,
+    });
+  }
+}
+
 // The map's other streamed transports (ships, zeppelins, trams, elevators):
 // a small neutral marker at each, turning with its heading, with the players
 // standing on it (the module's WMT2 list) on hover and in the selection
@@ -9928,6 +9999,7 @@ function drawInstanceCanvas(followPass: boolean): void {
       if (battleground && battleground.mapId === 628) {
         drawInstanceIcStructures(ctx, session, battleground, projection, live, liveNow, structureScale, playerNameOf);
       }
+      drawInstanceCapturePoints(ctx, session, projection, battleground, structureScale);
       // Every other streamed transport (ships, zeppelins, trams, elevators),
       // with the players standing on it on hover.
       if (live) drawInstanceTransportMarkers(ctx, session, projection, liveNow, structureScale, playerNameOf);
@@ -10926,6 +10998,13 @@ $instanceStructuresBtn?.setAttribute('aria-pressed', String(instanceShowStructur
 $instanceStructuresBtn?.addEventListener('click', () => setInstanceShowStructures(!instanceShowStructures));
 $instanceStructures2dBtn?.setAttribute('aria-pressed', String(instanceShowStructures));
 $instanceStructures2dBtn?.addEventListener('click', () => setInstanceShowStructures(!instanceShowStructures));
+$instanceObjectivesBtn?.setAttribute('aria-pressed', String(instanceShowObjectives));
+$instanceObjectivesBtn?.addEventListener('click', () => {
+  instanceShowObjectives = !instanceShowObjectives;
+  $instanceObjectivesBtn.setAttribute('aria-pressed', String(instanceShowObjectives));
+  storeSetting(INSTANCE_OBJECTIVES_STORAGE_KEY, String(instanceShowObjectives));
+  renderInstanceCanvas();
+});
 $instanceNumbersBtn?.setAttribute('aria-pressed', String(instanceShowNumbers));
 $instanceNumbersBtn?.addEventListener('click', () => setInstanceShowNumbers(!instanceShowNumbers));
 $instanceGlowsBtn?.setAttribute('aria-pressed', String(instanceShowGlows));
