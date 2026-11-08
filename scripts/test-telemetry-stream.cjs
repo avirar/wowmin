@@ -22,7 +22,8 @@ const {
   TelemetryStream,
   parseAppearanceDatagram, parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parseDebuffDatagram,
   parseGameObjectDatagram, parseMarkerDatagram, parsePassengerDatagram, parsePathDatagram,
-  parseStreamDatagram, parseTransportDatagram, parseUnitAuraDatagram, parseVehicleBlipDatagram,
+  parseStreamDatagram, parseTransportDatagram, parseTransportPassengerDatagram, parseUnitAuraDatagram,
+  parseVehicleBlipDatagram,
 } = loadModule('../src/telemetry-stream.ts');
 const {
   LIVE_AURA_STALE_MS, LIVE_BOT_STALE_MS, LIVE_CREATURE_STALE_MS, LIVE_PATH_STALE_MS, LIVE_RENDER_DELAY_MS, LiveAuraStore, LiveBotStore,
@@ -559,37 +560,47 @@ test('parses the vehicle minimap blip from v4 passenger entries', () => {
 });
 
 // Builds a datagram as BuildVehicleBlipDatagrams in WowMinTelemetry.cpp
-// does: 9-byte entries (u32 guid, u8 blip, u32 reserved), one per
-// minimap-blipping vehicle, occupied or not.
-function vehicleBlipDatagram(vehicles) {
+// does: 17-byte entries from v8 (9 before), with the real health and max
+// health after the v7 seat indicator.
+function vehicleBlipDatagram(vehicles, version = 8) {
+  const size = version >= 8 ? 17 : 9;
   const header = Buffer.alloc(24);
   header.write('WMV2', 0, 'latin1');
-  header.writeUInt8(5, 4);
+  header.writeUInt8(version, 4);
   header.writeUInt32LE(628, 8);
   header.writeUInt32LE(4, 12);
   header.writeUInt32LE(5000, 16);
   header.writeUInt16LE(vehicles.length, 20);
   return Buffer.concat([header, ...vehicles.map((vehicle) => {
-    const entry = Buffer.alloc(9);
+    const entry = Buffer.alloc(size);
     entry.writeUInt32LE(vehicle.vehicle, 0);
     entry.writeUInt8(vehicle.blip, 4);
+    entry.writeUInt32LE(vehicle.seatIndicator ?? 0, 5);
+    if (size === 17) {
+      entry.writeUInt32LE(vehicle.health ?? 0, 9);
+      entry.writeUInt32LE(vehicle.maxHealth ?? 0, 13);
+    }
     return entry;
   })]);
 }
 
 test('parses the minimap blips of occupied and unoccupied vehicles', () => {
   const parsed = parseVehicleBlipDatagram(vehicleBlipDatagram([
-    { vehicle: 0x50000167, blip: 1 },
+    { vehicle: 0x50000167, blip: 1, seatIndicator: 223, health: 45000, maxHealth: 60000 },
     { vehicle: 0x50000168, blip: 0 },
     { vehicle: 0x50000169, blip: 5 },
   ]));
   assert.equal(parsed.mapId, 628);
   assert.equal(parsed.instanceId, 4);
   assert.deepEqual(JSON.parse(JSON.stringify(parsed.vehicles)), [
-    { vehicleGuid: 0x50000167, blip: 1 },
-    { vehicleGuid: 0x50000168, blip: 0 },
-    { vehicleGuid: 0x50000169, blip: 5 },
+    { vehicleGuid: 0x50000167, blip: 1, seatIndicator: 223, health: 45000, maxHealth: 60000 },
+    { vehicleGuid: 0x50000168, blip: 0, seatIndicator: 0, health: 0, maxHealth: 0 },
+    { vehicleGuid: 0x50000169, blip: 5, seatIndicator: 0, health: 0, maxHealth: 0 },
   ]);
+  // A v5/v6 module wrote the reserved word zero: no seat indicator, and a
+  // v7 stream has no health either.
+  assert.equal(parseVehicleBlipDatagram(vehicleBlipDatagram([{ vehicle: 7, blip: 2 }], 6)).vehicles[0].seatIndicator, 0);
+  assert.equal(parseVehicleBlipDatagram(vehicleBlipDatagram([{ vehicle: 7, blip: 2 }], 7)).vehicles[0].maxHealth, 0);
   // A truncated entry (its reserved words short) is rejected.
   const good = vehicleBlipDatagram([{ vehicle: 3, blip: 2 }]);
   assert.equal(parseVehicleBlipDatagram(good.subarray(0, good.length - 1)), null);
@@ -606,7 +617,8 @@ test('parses the minimap blips of occupied and unoccupied vehicles', () => {
 });
 
 // Builds a datagram as BuildGameObjectDatagrams in WowMinTelemetry.cpp does.
-function gameObjectDatagram(objects, version = 6) {
+function gameObjectDatagram(objects, version = 8) {
+  const size = version >= 8 ? 60 : 48;
   const header = Buffer.alloc(24);
   header.write('WMG1', 0, 'latin1');
   header.writeUInt8(version, 4);
@@ -615,7 +627,7 @@ function gameObjectDatagram(objects, version = 6) {
   header.writeUInt32LE(5000, 16);
   header.writeUInt16LE(objects.length, 20);
   return Buffer.concat([header, ...objects.map((object) => {
-    const entry = Buffer.alloc(48);
+    const entry = Buffer.alloc(size);
     entry.writeUInt32LE(object.guid, 0);
     entry.writeUInt32LE(object.entry, 4);
     entry.writeUInt32LE(object.display, 8);
@@ -624,25 +636,39 @@ function gameObjectDatagram(objects, version = 6) {
     entry.writeUInt8(object.type, 42);
     entry.writeUInt8(object.state, 43);
     entry.writeUInt8(object.gone ? 1 : 0, 44);
-    entry.writeUInt8(object.health ?? 0, 45);
+    entry.writeUInt8(object.healthPct ?? 0, 45);
+    if (size === 60) {
+      entry.writeUInt32LE(object.health ?? 0, 48);
+      entry.writeUInt32LE(object.maxHealth ?? 0, 52);
+      entry.writeUInt32LE(object.damagedNumHits ?? 0, 56);
+    }
     return entry;
   })]);
 }
 
 test('parses game objects and forgets despawned ones', () => {
   const banner = { guid: 50, entry: 180058, display: 6251, x: 1166.5, y: 1200.5, z: -56.5, rotation: [0, 0, 0.5, 0.75], scale: 1, type: 1, state: 1 };
-  // An IoC gate: a destructible building with health.
-  const gate = { ...banner, guid: 51, entry: 195699, display: 6271, type: 33, state: 0, health: 42 };
+  // An IoC gate: a destructible building with 600,001 HP, 599,999 left.
+  const gate = { ...banner, guid: 51, entry: 195699, display: 6271, type: 33, state: 0,
+    healthPct: 99, health: 599999, maxHealth: 600001, damagedNumHits: 600000 };
   const parsed = parseGameObjectDatagram(gameObjectDatagram([banner, gate]));
   assert.equal(parsed.mapId, 529);
   assert.deepEqual(JSON.parse(JSON.stringify(parsed.objects[0])), {
     guid: 50, entry: 180058, displayId: 6251, x: 1166.5, y: 1200.5, z: -56.5, rotation: [0, 0, 0.5, 0.75], scale: 1,
-    type: 1, state: 1, gone: false, healthPct: 0,
+    type: 1, state: 1, gone: false, healthPct: 0, health: 0, maxHealth: 0, damagedNumHits: 0,
   });
   assert.equal(parsed.objects[1].state, 0);
   // Version 6 carries the destructible building's health; the v5 module
   // wrote its reserved byte zero, so older streams parse as undamaged.
-  assert.equal(parsed.objects[1].healthPct, 42);
+  assert.equal(parsed.objects[1].healthPct, 99);
+  // Version 8 appends the core's real hit points and damage threshold.
+  assert.equal(parsed.objects[1].health, 599999);
+  assert.equal(parsed.objects[1].maxHealth, 600001);
+  assert.equal(parsed.objects[1].damagedNumHits, 600000);
+  // A v7 stream has only the whole percent.
+  const oldGate = parseGameObjectDatagram(gameObjectDatagram([gate], 7)).objects[0];
+  assert.equal(oldGate.health, 0);
+  assert.equal(oldGate.maxHealth, 0);
   assert.equal(parseGameObjectDatagram(gameObjectDatagram([banner], 5)).objects[0].healthPct, 0);
   const good = gameObjectDatagram([banner]);
   assert.equal(parseGameObjectDatagram(good.subarray(0, good.length - 1)), null);
@@ -657,28 +683,38 @@ test('parses game objects and forgets despawned ones', () => {
   assert.equal(store.all(1000 + LIVE_GAMEOBJECT_STALE_MS + 1).length, 0);
 });
 
-// Builds a WMT1 datagram exactly as BuildTransportDatagrams in WowMinTelemetry.cpp does.
-function transportDatagram({ mapId = 601, instanceId = 7, serverTimeMs = 5000, transports }) {
+// Builds a WMT1 datagram exactly as BuildTransportDatagrams in WowMinTelemetry.cpp does:
+// 48-byte entries from v7 (36 before), with the route period, path time, key
+// frames, and static/instance flags after the display id.
+function transportDatagram({ mapId = 601, instanceId = 7, serverTimeMs = 5000, transports, version = 7 }) {
+  const size = version >= 7 ? 48 : 36;
   const header = Buffer.alloc(24);
   header.write('WMT1', 0, 'latin1');
-  header.writeUInt8(1, 4);
+  header.writeUInt8(version, 4);
   header.writeUInt32LE(mapId, 8);
   header.writeUInt32LE(instanceId, 12);
   header.writeUInt32LE(serverTimeMs, 16);
   header.writeUInt16LE(transports.length, 20);
   return Buffer.concat([header, ...transports.map((transport) => {
-    const entry = Buffer.alloc(36);
+    const entry = Buffer.alloc(size);
     entry.writeUInt32LE(transport.guid, 0);
     entry.writeUInt32LE(transport.entry, 4);
     [transport.x, transport.y, transport.z, transport.orientation].forEach((value, index) => entry.writeFloatLE(value, 8 + index * 4));
     entry.writeUInt32LE(transport.pathProgress, 24);
     entry.writeUInt32LE(transport.displayId, 28);
+    if (size === 48) {
+      entry.writeUInt32LE(transport.period ?? 0, 32);
+      entry.writeUInt32LE(transport.pathTime ?? 0, 36);
+      entry.writeUInt16LE(transport.keyFrames ?? 0, 40);
+      entry.writeUInt8(transport.flags ?? 0, 42);
+    }
     return entry;
   })]);
 }
 
 test('parses a transport datagram and rejects truncated or foreign ones', () => {
-  const zeppelin = { guid: 30, entry: 18442, x: 1541.77, y: 5854.94, z: 3190.0, orientation: 0.75, pathProgress: 3200, displayId: 18472 };
+  const zeppelin = { guid: 30, entry: 18442, x: 1541.77, y: 5854.94, z: 3190.0, orientation: 0.75, pathProgress: 3200,
+    displayId: 18472, period: 120000, pathTime: 118000, keyFrames: 42, flags: 0 };
   const parsed = parseTransportDatagram(transportDatagram({ transports: [zeppelin] }));
   assert.equal(parsed.mapId, 601);
   assert.equal(parsed.instanceId, 7);
@@ -692,6 +728,19 @@ test('parses a transport datagram and rejects truncated or foreign ones', () => 
   near(transport.orientation, 0.75, 'orientation');
   assert.equal(transport.pathProgress, 3200);
   assert.equal(transport.displayId, 18472);
+  assert.equal(transport.period, 120000);
+  assert.equal(transport.pathTime, 118000);
+  assert.equal(transport.keyFrames, 42);
+  assert.equal(transport.flags, 0);
+  // A static elevator route, flagged as such.
+  const elevator = parseTransportDatagram(transportDatagram({ transports: [{ ...zeppelin, flags: 1 | 2 }] })).transports[0];
+  assert.equal(elevator.flags, 3);
+  // A version 6 module's 36-byte entries still parse, without the new fields.
+  const old = parseTransportDatagram(transportDatagram({ transports: [{ ...zeppelin, period: 0 }], version: 6 })).transports[0];
+  assert.equal(old.period, 0);
+  assert.equal(old.pathTime, 0);
+  assert.equal(old.keyFrames, 0);
+  assert.equal(old.flags, 0);
   const good = transportDatagram({ transports: [zeppelin] });
   assert.equal(parseTransportDatagram(good.subarray(0, good.length - 1)), null);
   assert.equal(parseCreatureDatagram(good), null);
@@ -706,6 +755,75 @@ test('interpolates transports and drops ones that stop being sent', () => {
   near(sample.z, 105, 'halfway');
   near(sample.orientation, 0.5, 'facing');
   assert.equal(buffer.samples(1100 + LIVE_CREATURE_STALE_MS + 1).length, 0);
+});
+
+// Builds a WMT2 datagram exactly as BuildTransportPassengerDatagrams in
+// WowMinTelemetry.cpp does: 32-byte entries from v7, with the transport-local
+// offset and the client's transport clock after the two GUIDs.
+function transportPassengerDatagram(passengers, version = 7) {
+  const header = Buffer.alloc(24);
+  header.write('WMT2', 0, 'latin1');
+  header.writeUInt8(version, 4);
+  header.writeUInt32LE(571, 8);
+  header.writeUInt32LE(0, 12);
+  header.writeUInt32LE(5000, 16);
+  header.writeUInt16LE(passengers.length, 20);
+  return Buffer.concat([header, ...passengers.map((passenger) => {
+    const entry = Buffer.alloc(32);
+    entry.writeUInt32LE(passenger.transport, 0);
+    entry.writeUInt32LE(passenger.player, 4);
+    [passenger.x ?? 0, passenger.y ?? 0, passenger.z ?? 0, passenger.orientation ?? 0]
+      .forEach((value, index) => entry.writeFloatLE(value, 8 + index * 4));
+    entry.writeUInt32LE(passenger.time ?? 0, 24);
+    entry.writeUInt32LE(passenger.time2 ?? 0, 28);
+    return entry;
+  })]);
+}
+
+test('parses the players standing on transports and expires them', () => {
+  const parsed = parseTransportPassengerDatagram(transportPassengerDatagram([
+    { transport: 30, player: 7, x: 1.5, y: -2.25, z: 6.099, orientation: 4.1, time: 1234, time2: 5678 },
+    { transport: 30, player: 9 },
+    { transport: 41, player: 11 },
+  ]));
+  assert.equal(parsed.mapId, 571);
+  const [first] = parsed.passengers;
+  assert.equal(first.transportGuid, 30);
+  assert.equal(first.playerGuid, 7);
+  near(first.x, 1.5, 'offset x');
+  near(first.y, -2.25, 'offset y');
+  near(first.z, 6.099, 'offset z');
+  near(first.orientation, 4.1, 'offset o');
+  assert.equal(first.time, 1234);
+  assert.equal(first.time2, 5678);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.passengers.map((p) => [p.transportGuid, p.playerGuid]))),
+    [[30, 7], [30, 9], [41, 11]]);
+  // A truncated entry is rejected, and the family does not answer to WMT1.
+  const good = transportPassengerDatagram([{ transport: 30, player: 7 }]);
+  assert.equal(parseTransportPassengerDatagram(good.subarray(0, good.length - 1)), null);
+  assert.equal(parseTransportDatagram(good), null);
+
+  const { LiveTransportPassengerStore, LIVE_TRANSPORT_PASSENGER_STALE_MS } = loadModule('../renderer/scripts/utils/live-positions.ts');
+  const store = new LiveTransportPassengerStore();
+  const plain = (players) => JSON.parse(JSON.stringify(players));
+  const guids = (entries) => entries.map((entry) => entry.playerGuid);
+  store.push(parsed, 1000);
+  assert.deepEqual(plain(guids(store.on(30, 1500))), [7, 9]);
+  assert.deepEqual(plain(guids(store.on(41, 1500))), [11]);
+  assert.deepEqual(plain(store.on(99, 1500)), []);
+  // The riders keep their offsets.
+  near(store.on(30, 1500)[0].x, 1.5, 'stored offset x');
+  // The module sends the full list each snapshot; the last one wins.
+  store.push(parseTransportPassengerDatagram(transportPassengerDatagram([{ transport: 30, player: 9 }])), 2000);
+  assert.deepEqual(plain(guids(store.on(30, 2500))), [9]);
+  // Nobody aboard any more: the list expires rather than sticking.
+  assert.deepEqual(plain(store.on(30, 2000 + LIVE_TRANSPORT_PASSENGER_STALE_MS + 1)), []);
+});
+
+test('accepts the version 7 stream header', () => {
+  const parsed = parseStreamDatagram(datagram({ version: 7, players: [tankard] }));
+  assert.equal(parsed.players.length, 1);
+  assert.equal(parsed.players[0].name, 'Tankard');
 });
 
 // Builds a WMD1/WMR1 datagram as WowMinTelemetry.cpp does.
@@ -773,14 +891,15 @@ function withVersion(packet, version) {
   return copy;
 }
 
-test('accepts stream v1-v6 for every family and rejects unknown versions', () => {
+test('accepts stream v1-v8 for every family and rejects unknown versions', () => {
   const parsers = [
     ['WMP1', parsePathDatagram], ['WMC1', parseCreatureDatagram], ['WMB1', parseBotDatagram],
     ['WMA1', parseAppearanceDatagram], ['WME1', parseCombatEventDatagram], ['WMU1', parseUnitAuraDatagram],
     ['WMV1', parsePassengerDatagram], ['WMV2', parseVehicleBlipDatagram], ['WMG1', parseGameObjectDatagram],
     ['WMD1', parseDebuffDatagram], ['WMR1', parseMarkerDatagram], ['WMT1', parseTransportDatagram],
+    ['WMT2', parseTransportPassengerDatagram],
   ];
-  for (const version of [1, 2, 3, 4, 5, 6]) {
+  for (const version of [1, 2, 3, 4, 5, 6, 7, 8]) {
     const frame = parseStreamDatagram(datagram({ version, players: [tankard] }));
     assert.equal(frame.players[0].guid, tankard.guid);
     assert.equal(frame.players[0].roleMask, version >= 2 ? tankard.roleMask : undefined);
@@ -788,9 +907,9 @@ test('accepts stream v1-v6 for every family and rejects unknown versions', () =>
       assert.ok(parse(withVersion(entriesDatagram(magic, []), version)), `${magic} v${version}`);
     }
   }
-  assert.equal(parseStreamDatagram(datagram({ version: 7, players: [] })), null);
+  assert.equal(parseStreamDatagram(datagram({ version: 9, players: [] })), null);
   for (const [magic, parse] of parsers) {
-    assert.equal(parse(withVersion(entriesDatagram(magic, []), 7)), null, magic);
+    assert.equal(parse(withVersion(entriesDatagram(magic, []), 9)), null, magic);
   }
 });
 

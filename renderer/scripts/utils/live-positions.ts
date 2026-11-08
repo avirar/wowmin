@@ -1,6 +1,6 @@
 import type {
   MapPlayerPosition, StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
-  StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamTransport, StreamTransportUpdate, StreamUnitAuraUpdate, StreamVehicleBlip, StreamVehicleBlipUpdate,
+  StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamTransport, StreamTransportPassenger, StreamTransportPassengerUpdate, StreamTransportUpdate, StreamUnitAuraUpdate, StreamVehicleBlip, StreamVehicleBlipUpdate,
 } from '../../../src/types/api';
 
 // Buffers stream samples per player and interpolates between them, drawing a
@@ -183,6 +183,35 @@ export class LiveTransportBuffer {
       else current.push(sampleHistory(samples, now));
     }
     return current;
+  }
+}
+
+// Transport passenger lists (WMT2) come with every snapshot while anyone
+// stands on a transport; past this without word, nobody does.
+export const LIVE_TRANSPORT_PASSENGER_STALE_MS = 2500;
+
+// Who stands on each transport (a ship's deck, a zeppelin, an elevator), by
+// transport guid. The module sends the full list every snapshot while it is
+// non-empty, so each update replaces the last.
+export class LiveTransportPassengerStore {
+  private entries: StreamTransportPassenger[] = [];
+  private at = 0;
+
+  push(update: StreamTransportPassengerUpdate, receivedAt: number): void {
+    this.entries = update.passengers;
+    this.at = receivedAt;
+  }
+
+  clear(): void {
+    this.entries = [];
+    this.at = 0;
+  }
+
+  // The players standing on the transport now, in the module's order, with
+  // their transport-local offsets and transport clock.
+  on(transportGuid: number, now: number): StreamTransportPassenger[] {
+    if (now - this.at > LIVE_TRANSPORT_PASSENGER_STALE_MS) return [];
+    return this.entries.filter((entry) => entry.transportGuid === transportGuid);
   }
 }
 
@@ -535,10 +564,17 @@ export const LIVE_VEHICLE_BLIP_STALE_MS = 2500;
 // The current minimap blip of every blippable vehicle, by vehicle guid
 // (occupied or not).
 export class LiveVehicleBlipStore {
-  private readonly blips = new Map<number, { at: number; blip: number }>();
+  private readonly blips = new Map<number, {
+    at: number; blip: number; seatIndicator: number; health: number; maxHealth: number;
+  }>();
 
   push(update: StreamVehicleBlipUpdate, receivedAt: number): void {
-    for (const vehicle of update.vehicles) this.blips.set(vehicle.vehicleGuid, { at: receivedAt, blip: vehicle.blip });
+    for (const vehicle of update.vehicles) {
+      this.blips.set(vehicle.vehicleGuid, {
+        at: receivedAt, blip: vehicle.blip, seatIndicator: vehicle.seatIndicator,
+        health: vehicle.health, maxHealth: vehicle.maxHealth,
+      });
+    }
   }
 
   clear(): void {
@@ -549,7 +585,10 @@ export class LiveVehicleBlipStore {
     const fresh: StreamVehicleBlip[] = [];
     for (const [guid, entry] of this.blips) {
       if (now - entry.at > LIVE_VEHICLE_BLIP_STALE_MS) this.blips.delete(guid);
-      else fresh.push({ vehicleGuid: guid, blip: entry.blip });
+      else fresh.push({
+        vehicleGuid: guid, blip: entry.blip, seatIndicator: entry.seatIndicator,
+        health: entry.health, maxHealth: entry.maxHealth,
+      });
     }
     return fresh;
   }

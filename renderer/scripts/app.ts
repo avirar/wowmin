@@ -13,7 +13,7 @@ import {
 import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle, POWER_COLORS } from './instance-scene/nameplates';
 import { ClientIcons } from './utils/client-icons';
 import { SpellNames } from './utils/spell-names';
-import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveDebuffStore, LiveGameObjectStore, LiveMarkerStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, LiveTransportBuffer, LiveVehicleBlipStore, trimPathToPosition } from './utils/live-positions';
+import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveDebuffStore, LiveGameObjectStore, LiveMarkerStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, LiveTransportBuffer, LiveTransportPassengerStore, LiveVehicleBlipStore, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
@@ -22,7 +22,7 @@ import { getClassIconHtml, getClassIconImage, getPlayerStateIconsHtml, getPlayer
 import { sceneExportNotice, sceneExportStatus } from '../../src/scene-export-version';
 import { formatBattlegroundOutcome } from '../../src/session-outcome';
 import { AppState, createInitialState, PlayerInfo } from './types/state';
-import type { CreatureInfo, StreamBotDecision, StreamCreatureSample, StreamStatus } from '../../src/types/api';
+import type { CreatureInfo, StreamBotDecision, StreamCreatureSample, StreamStatus, StreamVehicleBlip } from '../../src/types/api';
 import type { ConnectionProfile, DbConfig, SoapConfig, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapTransportPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/api';
 import { bindInventoryTableTooltips, formatInventoryLocation, ITEM_QUALITY_COLOR } from './inventory/wow-item-tooltip';
 
@@ -5427,6 +5427,8 @@ let mapMovementFrame: number | null = null;
 const MAP_MOVEMENT_ANIMATION_MS = 850;
 const mapImageCache = new Map<number, HTMLImageElement | 'failed'>();
 let mapSelectedPlayerName: string | null = null;
+// The selected Live Map transport (by entry + object GUID), for the panel table.
+let mapSelectedTransportKey: string | null = null;
 let mapSelectedBotWaypoint: MapBotWaypoint | null = null;
 let mapSelectedBotWaypointLoading = false;
 let mapSelectedBotWaypointRequestToken = 0;
@@ -6101,6 +6103,13 @@ function renderMapCanvas(): void {
   for (const t of getMapFilteredTransports()) {
     const { x, y } = projectWorldToViewport(t, bounds, content);
     const size = 6 * markerScale;
+    if (mapSelectedTransportKey !== null && mapTransportKey(t) === mapSelectedTransportKey) {
+      ctx.beginPath();
+      ctx.arc(x, y, 12 * markerScale, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
     ctx.beginPath();
     ctx.moveTo(x, y - size);
     ctx.lineTo(x + size, y);
@@ -6175,16 +6184,47 @@ function renderMapSelectedPanel(): void {
   const panel = $<HTMLElement>('map-selected-panel');
   if (!panel) return;
 
-  if (!mapSelectedPlayerName) { panel.classList.add('hidden'); return; }
-
-  const player = mapAllPlayers.find((p) => p.name === mapSelectedPlayerName);
-  if (!player) { panel.classList.add('hidden'); return; }
-
   const nameEl    = $<HTMLElement>('map-sel-name');
   const detailsEl = $<HTMLElement>('map-sel-details');
   const coordsEl  = $<HTMLElement>('map-sel-coords');
   const badgeEl   = $<HTMLElement>('map-sel-badge');
   const waypointEl = $<HTMLElement>('map-sel-waypoint');
+  const tableEl   = $<HTMLElement>('map-sel-table');
+  const actionsEl = panel.querySelector<HTMLElement>('.map-sel-actions');
+
+  // A selected transport: route fields and the standing-passenger debug
+  // table (the player-only SOAP actions stay hidden).
+  const transport = getSelectedMapTransport();
+  if (!transport && mapSelectedTransportKey) mapSelectedTransportKey = null;
+  if (transport) {
+    const riders = mapTransportRiders(transport);
+    const table = transportPassengerTable(riders);
+    panel.classList.remove('hidden');
+    if (nameEl) { nameEl.textContent = transport.name; nameEl.style.color = ''; }
+    if (badgeEl) badgeEl.innerHTML = '<span class="bot-badge">TRANSPORT</span>';
+    if (detailsEl) {
+      detailsEl.textContent = transportDebugLabel(
+        transport.period, transport.pathProgress, transport.flags, transport.pathTime, transport.keyFrames);
+    }
+    if (coordsEl) {
+      coordsEl.textContent = `(${transport.position_x.toFixed(0)}, ${transport.position_y.toFixed(0)}, ${transport.position_z.toFixed(0)})`;
+    }
+    if (waypointEl) waypointEl.textContent = '';
+    if (actionsEl) actionsEl.classList.add('hidden');
+    if (tableEl) {
+      tableEl.classList.toggle('hidden', !table);
+      tableEl.innerHTML = table ? transportTableHtml(table) : '';
+    }
+    return;
+  }
+
+  if (tableEl) { tableEl.classList.add('hidden'); tableEl.innerHTML = ''; }
+  if (actionsEl) actionsEl.classList.remove('hidden');
+
+  if (!mapSelectedPlayerName) { panel.classList.add('hidden'); return; }
+
+  const player = mapAllPlayers.find((p) => p.name === mapSelectedPlayerName);
+  if (!player) { panel.classList.add('hidden'); return; }
 
   const isBot = isMapBot(player);
   const raceName   = RACE_NAMES[player.race]   || `Race ${player.race}`;
@@ -6246,7 +6286,27 @@ $mapCanvas?.addEventListener('click', (e) => {
     if (dx * dx + dy * dy < hitRadius * hitRadius) { hit = p; break; }
   }
 
-  mapSelectedPlayerName = hit ? (mapSelectedPlayerName === hit.name ? null : hit.name) : null;
+  let hitTransport: MapTransportPosition | null = null;
+  if (!hit) {
+    const transportRadius = 12 * getCanvasPlayerIconScale(state.mapZoom);
+    for (const t of getMapFilteredTransports()) {
+      const { x, y } = projectWorldToViewport(t, bounds, layout.content);
+      const dx = mx - x, dy = my - y;
+      if (dx * dx + dy * dy < transportRadius * transportRadius) { hitTransport = t; break; }
+    }
+  } else {
+    mapSelectedTransportKey = null;
+  }
+  if (hitTransport) {
+    const key = mapTransportKey(hitTransport);
+    mapSelectedTransportKey = mapSelectedTransportKey === key ? null : key;
+    mapSelectedPlayerName = null;
+  } else if (!hit) {
+    mapSelectedPlayerName = null;
+    mapSelectedTransportKey = null;
+  } else {
+    mapSelectedPlayerName = mapSelectedPlayerName === hit.name ? null : hit.name;
+  }
   const resultEl = $<HTMLElement>('map-action-result');
   if (resultEl) { resultEl.textContent = ''; resultEl.className = 'action-result'; }
   renderMapCanvas();
@@ -6300,6 +6360,7 @@ $('map-selected-panel')?.addEventListener('click', async (e) => {
 // ── Deselect button ────────────────────────────────────────────────────────
 $('map-deselect-btn')?.addEventListener('click', () => {
   mapSelectedPlayerName = null;
+  mapSelectedTransportKey = null;
   clearSelectedBotWaypoint();
   renderMapCanvas();
   renderMapPlayerList();
@@ -6348,6 +6409,7 @@ $mapCanvas?.addEventListener('mousemove', (e) => {
   }
 
   if (hit) {
+    $mapTooltip.classList.remove('wide');
     const isBot     = /^RNDBOT/i.test(hit.account);
     const raceName  = RACE_NAMES[hit.race]  || `Race ${hit.race}`;
     const clsName   = CLASS_NAMES[hit.class] || `Class ${hit.class}`;
@@ -6367,11 +6429,16 @@ $mapCanvas?.addEventListener('mousemove', (e) => {
   } else if (hitTransport) {
     const trend = getTransportZTrend(hitTransport.map, hitTransport.entry);
     const trendLabel = trend > 0 ? ' ▲ ascending' : trend < 0 ? ' ▼ descending' : '';
+    const riders = mapTransportRiders(hitTransport);
+    const table = transportPassengerTable(riders);
     $mapTooltip.innerHTML =
       `<div class="map-tooltip-name">${escapeHtml(hitTransport.name)}</div>` +
-      `<div>Route ${(hitTransport.pathProgress / 100).toFixed(1)}%${trendLabel}</div>` +
+      `<div>${escapeHtml(transportDebugLabel(hitTransport.period, hitTransport.pathProgress, hitTransport.flags,
+        hitTransport.pathTime, hitTransport.keyFrames))}${trendLabel}</div>` +
+      (table ? transportTableHtml(table) : '') +
       `<div style="color:var(--text-muted);font-size:11px">(${hitTransport.position_x.toFixed(0)}, ${hitTransport.position_y.toFixed(0)}, ${hitTransport.position_z.toFixed(0)})</div>`;
-    const tw = 160;
+    $mapTooltip.classList.toggle('wide', Boolean(table));
+    const tw = table ? 360 : 160;
     const tx = mx + 14 + tw > W ? mx - tw - 6 : mx + 14;
     const ty = my - 10 < 0 ? my + 10 : my - 10;
     $mapTooltip.style.left = `${tx}px`;
@@ -6467,6 +6534,7 @@ $$<HTMLButtonElement>('.map-continent-btn').forEach((btn) => {
     preloadMapImage(state.mapSelectedContinent);
     resetMapZoom(false);
     mapSelectedPlayerName = null;
+    mapSelectedTransportKey = null;
     clearSelectedBotWaypoint();
     mapAllPlayers = [];
     renderMapCanvas();
@@ -6619,6 +6687,7 @@ const $instanceSelName = $<HTMLElement>('instance-sel-name');
 const $instanceSelDetails = $<HTMLElement>('instance-sel-details');
 const $instanceSelCoords = $<HTMLElement>('instance-sel-coords');
 const $instanceSelActions = $<HTMLElement>('instance-sel-actions');
+const $instanceSelTable = $<HTMLElement>('instance-sel-table');
 const $instanceActionResult = $<HTMLElement>('instance-action-result');
 const $instanceDeselectBtn = $<HTMLButtonElement>('instance-deselect-btn');
 // Maps whose scene notice the viewer has dismissed, until the page reloads.
@@ -6724,6 +6793,13 @@ let instanceViewBounds = new Map<string, InstanceCoordinateBounds>();
 const instanceViewTransforms = new Map<string, InstanceViewTransform>();
 const instanceSelectedFloorIds = new Map<string, number>();
 let instanceBaseViewport: InstanceProjectionViewport | null = null;
+// A small debug table under a hover tooltip (a transport's standing
+// passengers, with their transport-local offsets).
+type InstanceHitTable = {
+  columns: string[];
+  rows: string[][];
+};
+
 // A drawable unit's screen-space hover/click target, rebuilt every frame by the
 // flat render. `details` and `coords` fill the hover tooltip and the selection
 // panel; `isPlayer` marks players, the only kind with the SOAP action panel.
@@ -6737,10 +6813,17 @@ type InstanceHitArea = {
   coords: string;
   isPlayer: boolean;
   isBot: boolean;
+  // The stream identity, when the target has one (transports, vehicles):
+  // repeated entries (several identical elevators) share a name.
+  guid?: number;
+  table?: InstanceHitTable;
 };
 let instanceMarkerHitAreas: InstanceHitArea[] = [];
 // The unit the viewer last clicked, shown in the selection panel.
 let instanceSelection: InstanceHitArea | null = null;
+// The last panel content rendered for the selection, so a live refresh only
+// touches the DOM when something changed (riders, HP, position).
+let instanceSelectionSignature = '';
 let instancePanStart: { x: number; y: number; panX: number; panY: number; moved: boolean } | null = null;
 const instanceMapAssets = new Map<number, LoadedInstanceMapAsset | null>();
 // Live position stream for the selected session.
@@ -6811,6 +6894,8 @@ const instanceVehicleBlips = new LiveVehicleBlipStore();
 const instanceLiveGameObjects = new LiveGameObjectStore();
 // The map's moving transports (ships, zeppelins, trams, elevators).
 const instanceLiveTransports = new LiveTransportBuffer();
+// The players standing on each transport (not riding a vehicle seat).
+const instanceTransportPassengers = new LiveTransportPassengerStore();
 // Harmful auras and raid markers, for the plates.
 const instanceLiveDebuffs = new LiveDebuffStore();
 const instanceLiveMarkers = new LiveMarkerStore();
@@ -6926,6 +7011,7 @@ function syncInstanceLiveStream(): void {
   instanceVehicleBlips.clear();
   instanceLiveGameObjects.clear();
   instanceLiveTransports.clear();
+  instanceTransportPassengers.clear();
   instanceLiveDebuffs.clear();
   instanceLiveMarkers.clear();
   instanceCombatEffects.clear();
@@ -7000,6 +7086,10 @@ function syncInstanceLiveStream(): void {
       if (instanceLiveStream !== stream) return;
       instanceLiveTransports.push(update, performance.now());
       noteInstanceDebug('transports', update.transports.length);
+    },
+    onTransportPassengers: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceTransportPassengers.push(update, performance.now());
     },
     onDebuffs: (update) => {
       if (instanceLiveStream !== stream) return;
@@ -8362,16 +8452,53 @@ function findInstanceHitArea(x: number, y: number): InstanceHitArea | null {
 // Shows or hides the selection panel for a clicked unit. Players carry the
 // SOAP action buttons; the other kinds (mobs, transports, structures) are
 // info-only.
-function setInstanceSelection(hit: InstanceHitArea | null): void {
-  instanceSelection = hit;
+function instanceSelectionContent(hit: InstanceHitArea): string {
+  return `${hit.name}|${hit.details}|${hit.coords}|${hit.table ? JSON.stringify(hit.table) : ''}`;
+}
+
+function renderInstanceSelectionPanel(hit: InstanceHitArea, resetResult: boolean): void {
   if (!$instanceSelectedPanel) return;
-  if (!hit) { $instanceSelectedPanel.classList.add('hidden'); return; }
+  instanceSelectionSignature = instanceSelectionContent(hit);
   $instanceSelectedPanel.classList.remove('hidden');
   if ($instanceSelName) $instanceSelName.textContent = hit.isBot ? `${hit.name} (bot)` : hit.name;
   if ($instanceSelDetails) $instanceSelDetails.textContent = hit.details;
   if ($instanceSelCoords) $instanceSelCoords.textContent = hit.coords;
   if ($instanceSelActions) $instanceSelActions.classList.toggle('hidden', !hit.isPlayer);
-  if ($instanceActionResult) { $instanceActionResult.textContent = ''; $instanceActionResult.className = 'action-result'; }
+  if ($instanceSelTable) {
+    $instanceSelTable.classList.toggle('hidden', !hit.table);
+    $instanceSelTable.innerHTML = hit.table ? transportTableHtml(hit.table) : '';
+  }
+  if (resetResult && $instanceActionResult) {
+    $instanceActionResult.textContent = '';
+    $instanceActionResult.className = 'action-result';
+  }
+}
+
+function setInstanceSelection(hit: InstanceHitArea | null): void {
+  instanceSelection = hit;
+  instanceSelectionSignature = '';
+  if (!$instanceSelectedPanel) return;
+  if (!hit) {
+    $instanceSelectedPanel.classList.add('hidden');
+    if ($instanceSelTable) $instanceSelTable.classList.add('hidden');
+    return;
+  }
+  renderInstanceSelectionPanel(hit, true);
+}
+
+// The selection stores the hit area captured at click time; each render
+// rebuilds the areas (and a transport's rider table), so re-bind the panel
+// to the fresh one while it stays selected.
+function refreshInstanceSelection(): void {
+  if (!instanceSelection) return;
+  const selected = instanceSelection;
+  const match = instanceMarkerHitAreas.find((area) => selected.guid !== undefined
+    ? area.guid === selected.guid && area.kind === selected.kind
+    : area.kind === selected.kind && area.name === selected.name);
+  if (!match) return;
+  instanceSelection = match;
+  if (instanceSelectionContent(match) === instanceSelectionSignature) return;
+  renderInstanceSelectionPanel(match, false);
 }
 
 function updateInstanceTrails(session: ActiveInstanceSession): void {
@@ -8659,17 +8786,32 @@ function drawInstanceWatchPublicMap(
       transport.position_y + Math.sin(transport.orientation) * 10,
       transport.position_z,
     );
-    drawTramCarMarker(ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x), scale);
+    const angle = Math.atan2(ahead.y - origin.y, ahead.x - origin.x);
+    // The Deeprun Tram's cars keep their own marker; every other public-map
+    // transport (boats, zeppelins) gets the neutral box.
+    const tram = session.mapId === 369;
+    if (tram) drawTramCarMarker(ctx, origin, angle, scale);
+    else drawGenericTransportMarker(ctx, origin, angle, scale);
+    // WMAP version 9's WTRN/WTPA carries who is standing on it, with their
+    // transport-local offsets.
+    const riders = mapTransportRiders(transport);
+    const ridersTable = transportPassengerTable(riders);
     instanceMarkerHitAreas.push({
       kind: 'transport',
-      name: `Tram (entry ${transport.entry})`,
+      name: transport.name || (tram ? `Tram (entry ${transport.entry})` : `Transport (entry ${transport.entry})`),
       x: origin.x,
       y: origin.y,
-      radius: 8 * scale + 3,
-      details: 'Deeprun Tram car',
+      radius: (tram ? 8 : TRANSPORT_MARKER_SIZE / 2) * scale + 3,
+      details: `${tram ? 'Deeprun Tram car' : 'Transport'} • ${transportDebugLabel(
+        transport.period, transport.pathProgress, transport.flags, transport.pathTime, transport.keyFrames)}`
+        + (riders.length
+          ? ridersTable ? ` • ${riders.length} aboard` : ` • aboard: ${riders.map((rider) => rider.name).join(', ')}`
+          : ''),
       coords: `(${transport.position_x.toFixed(0)}, ${transport.position_y.toFixed(0)})`,
       isPlayer: false,
       isBot: false,
+      guid: transport.guid,
+      table: ridersTable,
     });
   }
 }
@@ -8723,13 +8865,16 @@ function drawInstanceIcStructures(
   live: boolean,
   liveNow: number,
   scale: number,
+  playerNameOf: (guid: number) => string | null,
 ): void {
   const states = new Map(battleground.worldStates.map((state) => [state.id, state.value]));
   if (!instanceShowTransports && !instanceShowStructures) return;
   // The gates' damage, by the streamed gameobject's health: full (or no
   // word yet) is intact, anything below is damaged.
-  const gateHealth = new Map(
-    instanceLiveGameObjects.all(liveNow).map((object) => [object.entry, object.healthPct]),
+  // The destructible buildings' real hit points (WMG1 v8), for the HP
+  // readout and the damaged/intact state.
+  const gateBuildings = new Map(
+    instanceLiveGameObjects.all(liveNow).map((object) => [object.entry, object]),
   );
   const gateCells = (faction: number): [number, number, number, number][] =>
     faction === 0 ? IC_GATE_ICONS.alliance
@@ -8744,8 +8889,21 @@ function drawInstanceIcStructures(
     const standing = !breached && states.get(gate.closedWorldState) === 1;
     // The breached worldstate is destroyed; a standing gate's damage is its
     // health. [0] intact, [1] damaged, [2] destroyed.
-    const health = gateHealth.get(gate.entry);
-    const gateState = breached ? 2 : health !== undefined && health > 0 && health < 100 ? 1 : 0;
+    const building = gateBuildings.get(gate.entry);
+    // Real hit points from the core (WMG1 v8); older streams only carry the
+    // client-facing whole percent, which is then shown alone.
+    const health = building?.health ?? 0;
+    const maxHealth = building?.maxHealth ?? 0;
+    const healthPct = maxHealth > 0 ? (health * 100) / maxHealth : building?.healthPct;
+    // The client switches to the damaged model at or below damagedNumHits.
+    const damagedLimit = building ? building.damagedNumHits || maxHealth || 0 : 0;
+    const gateState = breached ? 2
+      : building && health > 0 && (maxHealth === 0 || health <= damagedLimit) ? 1 : 0;
+    const healthLabel = building === undefined
+      ? 'HP unknown'
+      : maxHealth > 0
+        ? `${health.toLocaleString()} / ${maxHealth.toLocaleString()} (${(healthPct ?? 0).toFixed(2)}%)`
+        : `${(healthPct ?? 0).toFixed(2)}%`;
     const icon = instanceClientIcons.get('poi');
     if (!icon) continue;
     instanceMarkerHitAreas.push({
@@ -8754,7 +8912,7 @@ function drawInstanceIcStructures(
       x: origin.x,
       y: origin.y,
       radius: 10 * scale,
-      details: `${['Intact', 'Damaged', 'Destroyed'][gateState]} • ${gate.faction === 0 ? 'Alliance' : gate.faction === 1 ? 'Horde' : 'Neutral'} keep`,
+      details: `${['Intact', 'Damaged', 'Destroyed'][gateState]} • ${healthLabel} • ${gate.faction === 0 ? 'Alliance' : gate.faction === 1 ? 'Horde' : 'Neutral'} keep`,
       coords: `(${gate.x.toFixed(0)}, ${gate.y.toFixed(0)})`,
       isPlayer: false,
       isBot: false,
@@ -8772,20 +8930,39 @@ function drawInstanceIcStructures(
   if (!instanceShowTransports) return;
   const ships = live
     ? instanceLiveTransports.samples(liveNow).map((transport) => ({
+      guid: transport.guid,
       entry: transport.entry,
       x: transport.x,
       y: transport.y,
       z: transport.z,
       yaw: transport.orientation,
+      period: transport.period,
+      pathProgress: transport.pathProgress,
+      flags: transport.flags,
+      pathTime: transport.pathTime,
+      keyFrames: transport.keyFrames,
+      passengers: [] as TransportRider[],
     }))
     : instanceSnapshotTransports
         .filter((transport) => transport.map === session.mapId && transport.instanceId === session.instanceId)
         .map((transport) => ({
+          guid: transport.entry,
           entry: transport.entry,
           x: transport.position_x,
           y: transport.position_y,
           z: transport.position_z,
           yaw: transport.orientation,
+          period: transport.period,
+          pathProgress: transport.pathProgress,
+          flags: transport.flags,
+          pathTime: transport.pathTime,
+          keyFrames: transport.keyFrames,
+          passengers: (transport.passengers ?? []).map((passenger): TransportRider => ({
+            guid: passenger.guid,
+            name: passenger.name,
+            x: passenger.x, y: passenger.y, z: passenger.z,
+            orientation: passenger.orientation, time: passenger.time, time2: passenger.time2,
+          })),
         }));
   for (const ship of ships) {
     const faction = getTransportFaction(session.mapId, ship.entry);
@@ -8795,18 +8972,96 @@ function drawInstanceIcStructures(
     const ahead = projection.worldToScreen(ship.x + Math.cos(ship.yaw) * 10, ship.y + Math.sin(ship.yaw) * 10, ship.z);
     drawGunshipMarker(ctx, origin,
       Math.atan2(ahead.y - origin.y, ahead.x - origin.x) + GUNSHIP_HEADING_OFFSET, faction, scale);
+    const riders = live ? liveTransportRiders(ship.guid, liveNow, playerNameOf) : ship.passengers;
+    const ridersTable = transportPassengerTable(riders);
     instanceMarkerHitAreas.push({
       kind: 'transport',
       name: `Gunship (entry ${ship.entry})`,
       x: origin.x,
       y: origin.y,
       radius: GUNSHIP_MARKER_SIZE * scale / 2 + 4,
-      details: `${faction === 0 ? 'Alliance' : 'Horde'} airship`,
+      details: `${faction === 0 ? 'Alliance' : 'Horde'} airship • ${transportDebugLabel(
+        ship.period, ship.pathProgress, ship.flags, ship.pathTime, ship.keyFrames)}`
+        + (riders.length
+          ? ridersTable ? ` • ${riders.length} aboard` : ` • aboard: ${riders.map((rider) => rider.name).join(', ')}`
+          : ''),
       coords: `(${ship.x.toFixed(0)}, ${ship.y.toFixed(0)})`,
       isPlayer: false,
       isBot: false,
+      guid: ship.guid,
+      table: ridersTable,
     });
   }
+}
+
+// The map's other streamed transports (ships, zeppelins, trams, elevators):
+// a small neutral marker at each, turning with its heading, with the players
+// standing on it (the module's WMT2 list) on hover and in the selection
+// panel. The faction gunships keep their own marker.
+const TRANSPORT_MARKER_SIZE = 11;
+
+function drawInstanceTransportMarkers(
+  ctx: CanvasRenderingContext2D,
+  session: ActiveInstanceSession,
+  projection: MapProjection,
+  liveNow: number,
+  scale: number,
+  playerNameOf: (guid: number) => string | null,
+): void {
+  if (!instanceShowTransports) return;
+  for (const transport of instanceLiveTransports.samples(liveNow)) {
+    if (getTransportFaction(session.mapId, transport.entry) !== null) continue;
+    const origin = projection.worldToScreen(transport.x, transport.y, transport.z);
+    const ahead = projection.worldToScreen(
+      transport.x + Math.cos(transport.orientation) * 10,
+      transport.y + Math.sin(transport.orientation) * 10,
+      transport.z,
+    );
+    drawGenericTransportMarker(ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x), scale);
+    const riders = liveTransportRiders(transport.guid, liveNow, playerNameOf);
+    const ridersTable = transportPassengerTable(riders);
+    instanceMarkerHitAreas.push({
+      kind: 'transport',
+      name: `Transport (entry ${transport.entry})`,
+      x: origin.x,
+      y: origin.y,
+      radius: TRANSPORT_MARKER_SIZE * scale / 2 + 3,
+      details: `Transport • ${transportDebugLabel(
+        transport.period, transport.pathProgress, transport.flags, transport.pathTime, transport.keyFrames)}`
+        + (riders.length
+          ? ridersTable ? ` • ${riders.length} aboard` : ` • aboard: ${riders.map((rider) => rider.name).join(', ')}`
+          : ''),
+      coords: `(${transport.x.toFixed(0)}, ${transport.y.toFixed(0)})`,
+      isPlayer: false,
+      isBot: false,
+      guid: transport.guid,
+      table: ridersTable,
+    });
+  }
+}
+
+// A neutral marker for a streamed transport without its own art: a small
+// grey box with a darker cab, so the heading reads.
+function drawGenericTransportMarker(
+  ctx: CanvasRenderingContext2D,
+  point: { x: number; y: number },
+  angle: number,
+  scale: number,
+): void {
+  ctx.save();
+  ctx.translate(point.x, point.y);
+  ctx.rotate(angle);
+  ctx.scale(scale, scale);
+  ctx.fillStyle = 'rgba(148, 163, 184, 0.92)';
+  ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.rect(-6, -4, 12, 8);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.55)';
+  ctx.fillRect(3, -4, 3, 8);
+  ctx.restore();
 }
 
 // The gunship WMOs' nose faces opposite the streamed transport orientation,
@@ -8861,6 +9116,197 @@ const VEHICLE_BLIP_ICONS: (string | null)[] = [
   null, 'vehicle-horde', 'vehicle-alliance',
 ];
 
+// ── Vehicle seat indicators ────────────────────────────────────────────────
+// The client's own seat-indicator art (Interface\Vehicles\SeatIndicator),
+// baked from the client by scripts/extract-vehicle-seat-indicators.mjs: a
+// top-down silhouette per VehicleUIIndicator id and the seat positions from
+// VehicleUIIndSeat.dbc (normalized over the art, 0,0 top-left). A vehicle
+// with a known indicator draws as its silhouette with a dot per seat, filled
+// when someone sits there; every other vehicle keeps its minimap blip.
+interface VehicleSeatPosition {
+  seat: number;
+  x: number;
+  y: number;
+}
+
+interface VehicleSeatIndicator {
+  image: HTMLImageElement;
+  seats: VehicleSeatPosition[];
+}
+
+// Only the Demolisher (221 two-seat, 222 three-seat) and the Siege Engine
+// (223 four-seat, 227 two-seat) are mapped reliably; the bomber, mammoth,
+// motorcycle, and rocket rows keep the generic blip.
+const VEHICLE_SEAT_INDICATOR_IDS = new Set([221, 222, 223, 227]);
+
+// Creature entries whose Vehicle.dbc row carries one of those indicators:
+// Ulduar's Demolisher and Siege Engine and their salvaged counterparts. A
+// fallback for streams from a module older than version 7 (no indicator id).
+const VEHICLE_SEAT_INDICATOR_BY_ENTRY = new Map<number, number>([
+  [33109, 221], // Salvaged Demolisher (vehicle 338)
+  [34775, 222], // Demolisher (vehicle 509)
+  [33060, 227], // Salvaged Siege Engine (vehicle 336)
+  [34776, 223], // Siege Engine (vehicle 435)
+  [35069, 223], // Siege Engine (vehicle 514)
+]);
+
+const SEATED_VEHICLE_MARKER_SIZE = 19;
+const VEHICLE_SEAT_DOT_RADIUS = 2;
+
+const instanceSeatIndicators = new Map<number, VehicleSeatIndicator>();
+let instanceSeatIndicatorTableLoaded = false;
+
+async function loadInstanceSeatIndicators(): Promise<void> {
+  if (instanceSeatIndicatorTableLoaded) return;
+  instanceSeatIndicatorTableLoaded = true;
+  try {
+    const url = new URL('assets/vehicles/seat-indicators.json', window.location.href);
+    const response = await fetch(url);
+    if (!response.ok) return; // Not baked on this install: keep the blips.
+    const table = await response.json() as {
+      indicators?: Record<string, { art: string; seats: VehicleSeatPosition[] }>;
+    };
+    for (const [key, indicator] of Object.entries(table.indicators ?? {})) {
+      const id = Number(key);
+      if (!VEHICLE_SEAT_INDICATOR_IDS.has(id)) continue;
+      const image = new Image();
+      image.onload = () => renderInstanceCanvas();
+      image.src = new URL(`art/${indicator.art}`, url).href;
+      instanceSeatIndicators.set(id, { image, seats: indicator.seats ?? [] });
+    }
+  } catch {
+    // A missing or unreadable table leaves the minimap blips in place.
+  }
+}
+
+function getInstanceSeatIndicator(vehicle: StreamVehicleBlip, entry: number): VehicleSeatIndicator | null {
+  const id = vehicle.seatIndicator || VEHICLE_SEAT_INDICATOR_BY_ENTRY.get(entry) || 0;
+  const indicator = instanceSeatIndicators.get(id);
+  if (!indicator || !indicator.image.complete || indicator.image.naturalWidth === 0) return null;
+  return indicator;
+}
+
+// The client's seat indicator: the silhouette, turned with the heading (nose
+// up in the texture, as the blips are), with a dot at each seat position —
+// filled and warm when occupied, a faint ring when free.
+function drawVehicleSeatIndicator(
+  ctx: CanvasRenderingContext2D,
+  point: { x: number; y: number },
+  angle: number,
+  indicator: VehicleSeatIndicator,
+  occupiedSeats: Set<number>,
+  scale: number,
+): void {
+  const size = SEATED_VEHICLE_MARKER_SIZE * scale;
+  const width = (indicator.image.naturalWidth / indicator.image.naturalHeight) * size;
+  ctx.save();
+  ctx.translate(point.x, point.y);
+  ctx.rotate(angle + Math.PI / 2);
+  ctx.drawImage(indicator.image, -width / 2, -size / 2, width, size);
+  for (const seat of indicator.seats) {
+    const x = -width / 2 + seat.x * width;
+    const y = -size / 2 + seat.y * size;
+    const radius = VEHICLE_SEAT_DOT_RADIUS * scale;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    if (occupiedSeats.has(seat.seat)) {
+      ctx.fillStyle = '#ffd166';
+      ctx.fill();
+      ctx.lineWidth = 0.9 * scale;
+      ctx.strokeStyle = 'rgba(10, 18, 28, 0.92)';
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = 'rgba(8, 16, 26, 0.6)';
+      ctx.fill();
+      ctx.lineWidth = 0.9 * scale;
+      ctx.strokeStyle = 'rgba(226, 232, 240, 0.6)';
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+// A transport's standing passengers as the debug table rows: name, the
+// transport-local attachment offset (x, y, z, orientation), and the client's
+// transport clock (time, time2). Undefined when nobody is attached.
+type TransportRider = {
+  guid: number;
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  orientation: number;
+  time: number;
+  time2: number;
+};
+
+function transportTableHtml(table: InstanceHitTable): string {
+  return `<table><tr>${table.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr>`
+    + table.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')
+    + '</table>';
+}
+
+// The Live Map's WTRN transport records as table riders.
+function mapTransportRiders(transport: MapTransportPosition): TransportRider[] {
+  return (transport.passengers ?? []).map((passenger) => ({
+    guid: passenger.guid,
+    name: passenger.name,
+    x: passenger.x, y: passenger.y, z: passenger.z,
+    orientation: passenger.orientation, time: passenger.time, time2: passenger.time2,
+  }));
+}
+
+function mapTransportKey(transport: MapTransportPosition): string {
+  // A version 8 stream had no object GUID; fall back to the live position.
+  return `${transport.entry}:${transport.guid
+    || `${Math.round(transport.position_x)}:${Math.round(transport.position_y)}`}`;
+}
+
+function getSelectedMapTransport(): MapTransportPosition | null {
+  if (!mapSelectedTransportKey) return null;
+  return getMapFilteredTransports()
+    .find((transport) => mapTransportKey(transport) === mapSelectedTransportKey) ?? null;
+}
+
+function transportPassengerTable(passengers: TransportRider[]): InstanceHitTable | undefined {
+  // Riders a pre-offset stream named without identity (guid 0) have nothing
+  // to tabulate; they still count in the details line.
+  const known = passengers.filter((rider) => rider.guid !== 0);
+  if (known.length === 0) return undefined;
+  return {
+    columns: ['name', 'x', 'y', 'z', 'o', 'time', 't2'],
+    rows: known.map((rider) => [
+      rider.name,
+      rider.x.toFixed(2), rider.y.toFixed(2), rider.z.toFixed(2), rider.orientation.toFixed(2),
+      String(rider.time), String(rider.time2),
+    ]),
+  };
+}
+
+// The transport's own debug fields: static (animation) or motion route, the
+// route cycle, how far through it, and a motion route's path time and key
+// frames.
+function transportDebugLabel(period: number, pathProgress: number, flags: number, pathTime: number, keyFrames: number): string {
+  const kind = flags & 1 ? 'static' : 'motion';
+  const cycle = period > 0 ? `${(period / 1000).toFixed(1)}s cycle` : 'no cycle';
+  const progress = `${(pathProgress / 100).toFixed(1)}%`;
+  const route = pathTime > 0 ? ` • route ${(pathTime / 1000).toFixed(1)}s / ${keyFrames} frames` : '';
+  return `${kind} • ${cycle} • ${progress}${route}${flags & 2 ? ' • instance route' : ''}`;
+}
+
+// The live (WMT2) riders of a transport, with their offsets.
+function liveTransportRiders(
+  transportGuid: number,
+  liveNow: number,
+  playerNameOf: (guid: number) => string | null,
+): TransportRider[] {
+  return instanceTransportPassengers.on(transportGuid, liveNow).map((entry) => ({
+    guid: entry.playerGuid,
+    name: playerNameOf(entry.playerGuid) ?? `player ${entry.playerGuid}`,
+    x: entry.x, y: entry.y, z: entry.z, orientation: entry.orientation, time: entry.time, time2: entry.time2,
+  }));
+}
+
 // A vehicle with a blip: its pose from the live stream (a creature sample
 // for a creature vehicle, the player's own sample for a player vehicle),
 // drawn as the client's blip.
@@ -8877,8 +9323,10 @@ function drawInstanceVehicleBlips(
   projection: MapProjection,
   liveNow: number,
   scale: number,
+  playerNameOf: (guid: number) => string | null,
 ): void {
   if (!instanceShowTransports) return;
+  if (!instanceSeatIndicatorTableLoaded) void loadInstanceSeatIndicators();
   const vehicles = instanceVehicleBlips.all(liveNow);
   if (vehicles.length === 0) return;
   const countersDrawnByTransports = new Set(
@@ -8890,6 +9338,14 @@ function drawInstanceVehicleBlips(
   const playersByGuid = new Map(
     instanceLivePositions.samples(liveNow).map((sample) => [sample.guid, sample]),
   );
+  // The seat each rider is in (the DBC's virtual seat index is 1-based).
+  const ridersByVehicle = new Map<number, { seat: number; name: string }[]>();
+  for (const passenger of instanceLivePassengers.all(liveNow)) {
+    if (!passenger.vehicleCreature) continue;
+    const riders = ridersByVehicle.get(passenger.vehicleGuid) ?? [];
+    riders.push({ seat: passenger.seat + 1, name: playerNameOf(passenger.guid) ?? `player ${passenger.guid}` });
+    ridersByVehicle.set(passenger.vehicleGuid, riders);
+  }
   for (const vehicle of vehicles) {
     if (countersDrawnByTransports.has(vehicle.vehicleGuid & 0x00FFFFFF)) continue;
     const iconKey = VEHICLE_BLIP_ICONS[vehicle.blip] ?? null;
@@ -8902,21 +9358,37 @@ function drawInstanceVehicleBlips(
     const ahead = projection.worldToScreen(
       pose.x + Math.cos(pose.orientation) * 10, pose.y + Math.sin(pose.orientation) * 10, pose.z,
     );
-    drawVehicleBlipMarker(
-      ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x), iconKey, scale,
-      VEHICLE_BLIP_MARKER_SIZE,
-    );
+    const angle = Math.atan2(ahead.y - origin.y, ahead.x - origin.x);
     const blipEntry = creaturesByGuid.get(vehicle.vehicleGuid)?.entry ?? 0;
+    if (blipEntry && !instanceCreatureInfo.has(blipEntry)) requestInstanceCreatureInfo([blipEntry]);
+    const riders = ridersByVehicle.get(vehicle.vehicleGuid) ?? [];
+    const indicator = getInstanceSeatIndicator(vehicle, blipEntry);
+    if (indicator) {
+      drawVehicleSeatIndicator(ctx, origin, angle, indicator, new Set(riders.map((rider) => rider.seat)), scale);
+    } else {
+      drawVehicleBlipMarker(ctx, origin, angle, iconKey, scale, VEHICLE_BLIP_MARKER_SIZE);
+    }
+    const vehicleName = instanceCreatureInfo.get(blipEntry)?.name || (blipEntry ? `Vehicle (entry ${blipEntry})` : 'Vehicle');
+    // The vehicle creature's real hit points (WMV2 v8), when streamed.
+    const hp = vehicle.maxHealth > 0
+      ? `${vehicle.health.toLocaleString()} / ${vehicle.maxHealth.toLocaleString()} `
+        + `(${((vehicle.health * 100) / vehicle.maxHealth).toFixed(2)}%)`
+      : '';
+    const details = indicator
+      ? `${indicator.seats.length} seats • ${riders.length ? riders.map((rider) => rider.name).join(', ') : 'all empty'}`
+        + (hp ? ` • HP ${hp}` : '')
+      : `Vehicle minimap blip${hp ? ` • HP ${hp}` : ''}`;
     instanceMarkerHitAreas.push({
       kind: 'transport',
-      name: blipEntry ? `Vehicle (entry ${blipEntry})` : 'Vehicle',
+      name: vehicleName,
       x: origin.x,
       y: origin.y,
-      radius: VEHICLE_BLIP_MARKER_SIZE * scale / 2 + 3,
-      details: 'Vehicle minimap blip',
+      radius: (indicator ? SEATED_VEHICLE_MARKER_SIZE : VEHICLE_BLIP_MARKER_SIZE) * scale / 2 + 3,
+      details,
       coords: `(${pose.x.toFixed(0)}, ${pose.y.toFixed(0)})`,
       isPlayer: false,
       isBot: false,
+      guid: vehicle.vehicleGuid,
     });
   }
 }
@@ -9172,13 +9644,20 @@ function drawInstanceCanvas(followPass: boolean): void {
     // reads; the earlier linear, uncapped growth let them outgrow the players
     // once the detailed bake was zoomed in.
     const structureScale = getCanvasPlayerIconScale(viewTransform.zoom);
+    // Transport passenger lists carry stream GUIDs, not names.
+    const playerNameOf = (guid: number): string | null => instanceLivePositions.nameOf(guid);
     if (session.instanceId === 0) drawInstanceWatchPublicMap(ctx, session, projection, structureScale);
-    else if (battleground && battleground.mapId === 628) {
-      drawInstanceIcStructures(ctx, session, battleground, projection, live, liveNow, structureScale);
+    else {
+      if (battleground && battleground.mapId === 628) {
+        drawInstanceIcStructures(ctx, session, battleground, projection, live, liveNow, structureScale, playerNameOf);
+      }
+      // Every other streamed transport (ships, zeppelins, trams, elevators),
+      // with the players standing on it on hover.
+      if (live) drawInstanceTransportMarkers(ctx, session, projection, liveNow, structureScale, playerNameOf);
     }
     // The minimap blips of every blippable vehicle, occupied or not (the
     // gunships keep their own marker, which the blip pass dedupes against).
-    if (live) drawInstanceVehicleBlips(ctx, projection, liveNow, structureScale);
+    if (live) drawInstanceVehicleBlips(ctx, projection, liveNow, structureScale, playerNameOf);
   }
   const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>) =>
     projection.worldToScreen(position.position_x, position.position_y, position.position_z);
@@ -9532,6 +10011,7 @@ function drawInstanceCanvas(followPass: boolean): void {
     particles: isoView ? sceneView?.spellArt.particles ?? 0 : 0,
   };
   if (liveNow - instanceBotCardRenderedAt >= INSTANCE_BOT_CARD_INTERVAL_MS) renderInstanceBotCard(session, liveNow);
+  refreshInstanceSelection();
 }
 
 // The action a bot is carrying out now, or null if it has done nothing lately.
@@ -10038,16 +10518,24 @@ $instanceWatchCanvas?.addEventListener('pointermove', (event) => {
   const y = (event.clientY - rect.top) * $instanceWatchCanvas.height / rect.height;
   const hit = findInstanceHitArea(x, y);
   if (hit) {
+    const table = hit.table
+      ? '<table class="map-tooltip-table">'
+        + `<tr>${hit.table.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr>`
+        + hit.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')
+        + '</table>'
+      : '';
     $instanceWatchTooltip.innerHTML =
       `<div class="map-tooltip-name">${escapeHtml(hit.name)}</div>` +
       `<div>${escapeHtml(hit.details)}</div>` +
+      table +
       `<div style="color:var(--text-muted);font-size:11px">${escapeHtml(hit.coords)}</div>` +
       (hit.isBot ? '<div class="map-tooltip-bot">BOT</div>' : '');
-    const tw = 160;
+    const tw = hit.table ? 360 : 160;
     const tx = x + 14 + tw > $instanceWatchCanvas.width ? x - tw - 6 : x + 14;
     const ty = y - 10 < 0 ? y + 10 : y - 10;
     $instanceWatchTooltip.style.left = `${tx}px`;
     $instanceWatchTooltip.style.top = `${ty}px`;
+    $instanceWatchTooltip.classList.toggle('wide', Boolean(hit.table));
     $instanceWatchTooltip.classList.remove('hidden');
     $instanceWatchCanvas.style.cursor = 'pointer';
   } else {

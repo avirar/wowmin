@@ -418,6 +418,12 @@ export interface StreamVehicleBlip {
   vehicleGuid: number;
   // The client's s_vehicleTextures index (as StreamPassenger.blip).
   blip: number;
+  // The vehicle's VehicleUIIndicator id (Vehicle.dbc), the client's seat
+  // indicator artwork; 0 when it has none (pre-version-7 streams: 0).
+  seatIndicator: number;
+  // The vehicle creature's real hit points, from version 8 (0 before).
+  health: number;
+  maxHealth: number;
 }
 
 export interface StreamVehicleBlipUpdate {
@@ -425,6 +431,28 @@ export interface StreamVehicleBlipUpdate {
   instanceId: number;
   serverTimeMs: number;
   vehicles: StreamVehicleBlip[];
+}
+
+// A player standing on a transport (a ship's deck, a zeppelin, an elevator),
+// from the module's transport passenger list. The offset is the
+// transport-local attachment position the server maintains; time/time2 are
+// the client's transport clock, for desync debugging.
+export interface StreamTransportPassenger {
+  transportGuid: number;
+  playerGuid: number;
+  x: number;
+  y: number;
+  z: number;
+  orientation: number;
+  time: number;
+  time2: number;
+}
+
+export interface StreamTransportPassengerUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  passengers: StreamTransportPassenger[];
 }
 
 // A harmful aura on a unit, for its nameplate.
@@ -488,6 +516,12 @@ export interface StreamGameObject {
   // A destructible building's health percent (0..100); 0 for objects
   // without health. Stream version 6 onward (a reserved byte before).
   healthPct: number;
+  // From version 8: the core's real hit points, max health, and the
+  // damaged-model threshold (a building reads damaged at or below it); all
+  // 0 for objects without health or in older streams.
+  health: number;
+  maxHealth: number;
+  damagedNumHits: number;
 }
 
 export interface StreamGameObjectUpdate {
@@ -509,6 +543,14 @@ export interface StreamTransport {
   // 0..10000 through the current route cycle.
   pathProgress: number;
   displayId: number;
+  // The route cycle in ms, and (motion routes) the path's total time and
+  // key-frame count (0 without a route).
+  period: number;
+  pathTime: number;
+  keyFrames: number;
+  // Bit 1: a static/animation transport (elevator); bit 2: the route lives
+  // in an instance.
+  flags: number;
 }
 
 export interface StreamTransportUpdate {
@@ -538,6 +580,7 @@ export interface StreamListeners {
   onVehicleBlips?: (update: StreamVehicleBlipUpdate) => void;
   onGameObjects?: (update: StreamGameObjectUpdate) => void;
   onTransports?: (update: StreamTransportUpdate) => void;
+  onTransportPassengers?: (update: StreamTransportPassengerUpdate) => void;
   onDebuffs?: (update: StreamDebuffUpdate) => void;
   onMarkers?: (update: StreamMarkerUpdate) => void;
 }
@@ -569,8 +612,24 @@ export interface StreamPathUpdate {
   paths: StreamPath[];
 }
 
+// A player standing on a transport, from the worldserver's WTPA records: the
+// transport-local attachment offset and the client's transport clock.
+export interface MapTransportPassenger {
+  guid: number;
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  orientation: number;
+  seat: number;
+  time: number;
+  time2: number;
+}
+
 // A live transport (ship, zeppelin, tram, elevator) from the worldserver's
-// WTRN records. pathProgress runs 0..10000 through the current route cycle.
+// WTRN records. pathProgress runs 0..10000 through the current route cycle;
+// passengers are the players standing on it (empty when nobody is aboard or
+// the module predates WMAP version 9).
 export interface MapTransportPosition {
   entry: number;
   name: string;
@@ -582,6 +641,17 @@ export interface MapTransportPosition {
   orientation: number;
   pathProgress: number;
   displayId: number;
+  // The transport object's GUID (links WTPA records); 0 before version 9.
+  guid: number;
+  // The route cycle in ms, and (motion routes) the path's total time and
+  // key-frame count.
+  period: number;
+  pathTime: number;
+  keyFrames: number;
+  // Bit 1: a static/animation transport (elevator); bit 2: the route lives
+  // in an instance.
+  flags: number;
+  passengers: MapTransportPassenger[];
 }
 
 export interface MapPlayerSnapshot {

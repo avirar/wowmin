@@ -45,6 +45,7 @@ assets/maps/*
 !assets/maps/README.txt
 assets/player-icons/
 assets/models/
+assets/vehicles/
 *.blp
 *.mpq
 *.MPQ

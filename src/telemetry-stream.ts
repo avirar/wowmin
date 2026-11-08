@@ -3,7 +3,7 @@ import * as dgram from 'dgram';
 import type {
   StreamAppearance, StreamAppearanceUpdate, StreamAuraCategory, StreamBotDecision, StreamCombatEvent, StreamCombatEventKind,
   StreamCombatEventUpdate, StreamDebuff, StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamUnitDebuffs, StreamPassenger, StreamPassengerUpdate, StreamTransport, StreamTransportUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
-  StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus, StreamVehicleBlip, StreamVehicleBlipUpdate,
+  StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus, StreamTransportPassenger, StreamTransportPassengerUpdate, StreamVehicleBlip, StreamVehicleBlipUpdate,
 } from './types/api';
 
 // Receives the mod-wowmin-telemetry UDP position stream. A session streams only
@@ -34,13 +34,22 @@ const GAMEOBJECT_MAGIC = 'WMG1';
 const DEBUFF_MAGIC = 'WMD1';
 const MARKER_MAGIC = 'WMR1';
 const TRANSPORT_MAGIC = 'WMT1';
+const TRANSPORT_PASSENGER_MAGIC = 'WMT2';
 const DEBUFF_SIZE = 16;
 const MARKER_SIZE = 8;
-const GAMEOBJECT_SIZE = 48;
-const TRANSPORT_SIZE = 36;
+// Version 8 grows the WMG1 entry with the building's real hit points.
+const GAMEOBJECT_SIZE_V7 = 48;
+const GAMEOBJECT_SIZE = 60;
+// Version 7 grows the WMT1 entry from 36 to 48 bytes: route period, path
+// time, key-frame count, and static/instance flags.
+const TRANSPORT_SIZE_V6 = 36;
+const TRANSPORT_SIZE = 48;
+// Version 7 adds the rider's transport-local offset and transport clock.
+const TRANSPORT_PASSENGER_SIZE = 32;
 const PASSENGER_SIZE = 12;
 const PASSENGER_SIZE_V4 = 13;
-const VEHICLE_BLIP_SIZE = 9;
+const VEHICLE_BLIP_SIZE_V7 = 9;
+const VEHICLE_BLIP_SIZE = 17;
 const LEGACY_VERSION = 1;
 const ROLE_MASK_VERSION = 2;
 const TAGGED_ID_VERSION = 3;
@@ -50,6 +59,12 @@ const VEHICLE_BLIP_VERSION = 5;
 // Version 6: the WMG1 entry's reserved byte becomes the object's health
 // percent (a destructible building's, 0 otherwise).
 const GAMEOBJECT_HEALTH_VERSION = 6;
+// Version 7 adds WMT2 (players standing on transports) and gives WMV2's
+// reserved u32 meaning: the vehicle's VehicleUIIndicator id.
+const TRANSPORT_PASSENGER_VERSION = 7;
+// Version 8 grows WMG1's object entry with the destructible building's real
+// health, max health, and damaged-model threshold.
+const GAMEOBJECT_HEALTH_VERSION_8 = 8;
 const HEADER_SIZE = 28;
 const PLAYER_SIZE_V1 = 30;
 const PLAYER_SIZE_V2 = 31;
@@ -68,7 +83,8 @@ const PLAYER_SIZE_V2 = 31;
 function supportedVersion(version: number): boolean {
   return version === LEGACY_VERSION || version === ROLE_MASK_VERSION
     || version === TAGGED_ID_VERSION || version === BLIP_VERSION
-    || version === VEHICLE_BLIP_VERSION || version === GAMEOBJECT_HEALTH_VERSION;
+    || version === VEHICLE_BLIP_VERSION || version === GAMEOBJECT_HEALTH_VERSION
+    || version === TRANSPORT_PASSENGER_VERSION || version === GAMEOBJECT_HEALTH_VERSION_8;
 }
 // Path, creature, and bot datagrams share a 24-byte header.
 const PATH_HEADER_SIZE = 24;
@@ -147,12 +163,19 @@ export interface PathDatagram {
   paths: Array<Omit<StreamPath, 'name'>>;
 }
 
-function readEntryHeader(buffer: Buffer, magic: string): { mapId: number; instanceId: number; serverTimeMs: number; count: number } | null {
+function readEntryHeader(buffer: Buffer, magic: string): {
+  version: number;
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  count: number;
+} | null {
   if (buffer.length < PATH_HEADER_SIZE || buffer.toString('latin1', 0, 4) !== magic
     || !supportedVersion(buffer.readUInt8(4))) {
     return null;
   }
   return {
+    version: buffer.readUInt8(4),
     mapId: buffer.readUInt32LE(8),
     instanceId: buffer.readUInt32LE(12),
     serverTimeMs: buffer.readUInt32LE(16),
@@ -396,23 +419,33 @@ export function parsePassengerDatagram(buffer: Buffer): StreamPassengerUpdate | 
 
 export function parseVehicleBlipDatagram(buffer: Buffer): StreamVehicleBlipUpdate | null {
   const header = readEntryHeader(buffer, VEHICLE_BLIP_MAGIC);
-  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * VEHICLE_BLIP_SIZE) return null;
+  const size = (header?.version ?? 0) >= GAMEOBJECT_HEALTH_VERSION_8 ? VEHICLE_BLIP_SIZE : VEHICLE_BLIP_SIZE_V7;
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * size) return null;
   const vehicles: StreamVehicleBlip[] = [];
   for (let index = 0; index < header.count; index += 1) {
-    const offset = PATH_HEADER_SIZE + index * VEHICLE_BLIP_SIZE;
+    const offset = PATH_HEADER_SIZE + index * size;
     const blip = buffer.readUInt8(offset + 4);
     if (blip === 0xff) continue;
-    vehicles.push({ vehicleGuid: buffer.readUInt32LE(offset), blip });
+    vehicles.push({
+      vehicleGuid: buffer.readUInt32LE(offset),
+      blip,
+      // The entry's reserved u32 from version 7; 0 in older streams.
+      seatIndicator: buffer.readUInt32LE(offset + 5),
+      // Version 8 appends the vehicle creature's real hit points.
+      health: size >= VEHICLE_BLIP_SIZE ? buffer.readUInt32LE(offset + 9) : 0,
+      maxHealth: size >= VEHICLE_BLIP_SIZE ? buffer.readUInt32LE(offset + 13) : 0,
+    });
   }
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, vehicles };
 }
 
 export function parseGameObjectDatagram(buffer: Buffer): StreamGameObjectUpdate | null {
   const header = readEntryHeader(buffer, GAMEOBJECT_MAGIC);
-  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * GAMEOBJECT_SIZE) return null;
+  const size = (header?.version ?? 0) >= GAMEOBJECT_HEALTH_VERSION_8 ? GAMEOBJECT_SIZE : GAMEOBJECT_SIZE_V7;
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * size) return null;
   const objects: StreamGameObject[] = [];
   for (let index = 0; index < header.count; index += 1) {
-    const offset = PATH_HEADER_SIZE + index * GAMEOBJECT_SIZE;
+    const offset = PATH_HEADER_SIZE + index * size;
     const float = (at: number) => buffer.readFloatLE(offset + at);
     objects.push({
       guid: buffer.readUInt32LE(offset),
@@ -429,6 +462,10 @@ export function parseGameObjectDatagram(buffer: Buffer): StreamGameObjectUpdate 
       // A reserved byte before version 6 (always 0), a destructible
       // building's health percent from it.
       healthPct: buffer.readUInt8(offset + 45),
+      // Version 8's real hit points after the older 48-byte record.
+      health: size >= GAMEOBJECT_SIZE ? buffer.readUInt32LE(offset + 48) : 0,
+      maxHealth: size >= GAMEOBJECT_SIZE ? buffer.readUInt32LE(offset + 52) : 0,
+      damagedNumHits: size >= GAMEOBJECT_SIZE ? buffer.readUInt32LE(offset + 56) : 0,
     });
   }
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, objects };
@@ -436,10 +473,11 @@ export function parseGameObjectDatagram(buffer: Buffer): StreamGameObjectUpdate 
 
 export function parseTransportDatagram(buffer: Buffer): StreamTransportUpdate | null {
   const header = readEntryHeader(buffer, TRANSPORT_MAGIC);
-  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * TRANSPORT_SIZE) return null;
+  const size = (header?.version ?? 0) >= 7 ? TRANSPORT_SIZE : TRANSPORT_SIZE_V6;
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * size) return null;
   const transports: StreamTransport[] = [];
   for (let index = 0; index < header.count; index += 1) {
-    const offset = PATH_HEADER_SIZE + index * TRANSPORT_SIZE;
+    const offset = PATH_HEADER_SIZE + index * size;
     transports.push({
       guid: buffer.readUInt32LE(offset),
       entry: buffer.readUInt32LE(offset + 4),
@@ -449,9 +487,35 @@ export function parseTransportDatagram(buffer: Buffer): StreamTransportUpdate | 
       orientation: buffer.readFloatLE(offset + 20),
       pathProgress: buffer.readUInt32LE(offset + 24),
       displayId: buffer.readUInt32LE(offset + 28),
+      // Version 7 adds the route period, path time, key frames, and flags;
+      // older streams carried two reserved words here.
+      period: size >= TRANSPORT_SIZE ? buffer.readUInt32LE(offset + 32) : 0,
+      pathTime: size >= TRANSPORT_SIZE ? buffer.readUInt32LE(offset + 36) : 0,
+      keyFrames: size >= TRANSPORT_SIZE ? buffer.readUInt16LE(offset + 40) : 0,
+      flags: size >= TRANSPORT_SIZE ? buffer.readUInt8(offset + 42) : 0,
     });
   }
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, transports };
+}
+
+export function parseTransportPassengerDatagram(buffer: Buffer): StreamTransportPassengerUpdate | null {
+  const header = readEntryHeader(buffer, TRANSPORT_PASSENGER_MAGIC);
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * TRANSPORT_PASSENGER_SIZE) return null;
+  const passengers: StreamTransportPassenger[] = [];
+  for (let index = 0; index < header.count; index += 1) {
+    const offset = PATH_HEADER_SIZE + index * TRANSPORT_PASSENGER_SIZE;
+    passengers.push({
+      transportGuid: buffer.readUInt32LE(offset),
+      playerGuid: buffer.readUInt32LE(offset + 4),
+      x: buffer.readFloatLE(offset + 8),
+      y: buffer.readFloatLE(offset + 12),
+      z: buffer.readFloatLE(offset + 16),
+      orientation: buffer.readFloatLE(offset + 20),
+      time: buffer.readUInt32LE(offset + 24),
+      time2: buffer.readUInt32LE(offset + 28),
+    });
+  }
+  return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, passengers };
 }
 
 export function parseDebuffDatagram(buffer: Buffer): StreamDebuffUpdate | null {
@@ -566,6 +630,8 @@ const ROUTES: Record<string, Route> = {
     (listener, update) => listener.onGameObjects?.(update)),
   [TRANSPORT_MAGIC]: route(parseTransportDatagram, (update) => update.transports.length > 0,
     (listener, update) => listener.onTransports?.(update)),
+  [TRANSPORT_PASSENGER_MAGIC]: route(parseTransportPassengerDatagram, (update) => update.passengers.length > 0,
+    (listener, update) => listener.onTransportPassengers?.(update)),
   [PASSENGER_MAGIC]: route(parsePassengerDatagram, (update) => update.passengers.length > 0,
     (listener, update) => listener.onPassengers?.(update)),
   [VEHICLE_BLIP_MAGIC]: route(parseVehicleBlipDatagram, (update) => update.vehicles.length > 0,

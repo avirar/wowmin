@@ -3595,6 +3595,13 @@ tbody tr:hover { background: var(--tint-accent-05); }
 }
 .map-tooltip-name { font-weight: bold; color: var(--accent-hover); margin-bottom: 2px; }
 .map-tooltip-bot  { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+/* A transport's standing passengers: a compact debug table under the tooltip. */
+.map-tooltip.wide { max-width: 460px; }
+.map-tooltip-table { margin-top: 4px; border-collapse: collapse; font-size: 10px; font-variant-numeric: tabular-nums; }
+.map-tooltip-table th { color: var(--text-muted); font-weight: 500; padding: 0 4px 1px; text-align: right; white-space: nowrap; }
+.map-tooltip-table td { padding: 0 4px; text-align: right; white-space: nowrap; }
+.map-tooltip-table th:first-child, .map-tooltip-table td:first-child { text-align: left; }
+.map-tooltip-table tr + tr td { border-top: 1px solid rgba(255, 255, 255, 0.06); }
 
 .map-statusbar {
   display: flex;
@@ -3650,7 +3657,8 @@ tbody tr:hover { background: var(--tint-accent-05); }
   border: 1px solid var(--accent);
   border-radius: var(--radius);
   padding: 8px 14px;
-  flex-wrap: nowrap;
+  /* A transport's rider table takes a second line under the info row. */
+  flex-wrap: wrap;
 }
 .map-sel-info {
   display: flex;
@@ -3670,6 +3678,13 @@ tbody tr:hover { background: var(--tint-accent-05); }
   font-size: 11px;
   font-family: var(--font-mono);
 }
+/* A transport's standing-passenger debug table, in either selected panel. */
+.map-sel-table { flex-basis: 100%; min-width: 0; overflow-x: auto; }
+.map-sel-table table { border-collapse: collapse; font-size: 10px; font-variant-numeric: tabular-nums; }
+.map-sel-table th { color: var(--text-muted); font-weight: 500; padding: 0 6px 1px; text-align: right; white-space: nowrap; }
+.map-sel-table td { padding: 0 6px; text-align: right; white-space: nowrap; }
+.map-sel-table th:first-child, .map-sel-table td:first-child { text-align: left; }
+.map-sel-table tr + tr td { border-top: 1px solid rgba(255, 255, 255, 0.06); }
 .map-sel-actions { display: flex; flex-shrink: 0; gap: 5px; flex-wrap: nowrap; }
 .map-selected-panel .btn-danger-action {
   background: var(--tint-danger-08);

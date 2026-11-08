@@ -85,6 +85,7 @@ const wowminAPI: WowminAPI = {
       source.addEventListener('vehicleblips', (event) => listeners.onVehicleBlips?.(data(event)));
       source.addEventListener('gameobjects', (event) => listeners.onGameObjects?.(data(event)));
       source.addEventListener('transports', (event) => listeners.onTransports?.(data(event)));
+      source.addEventListener('transportpassengers', (event) => listeners.onTransportPassengers?.(data(event)));
       source.addEventListener('debuffs', (event) => listeners.onDebuffs?.(data(event)));
       source.addEventListener('markers', (event) => listeners.onMarkers?.(data(event)));
       // EventSource reconnects by itself; report the gap meanwhile.

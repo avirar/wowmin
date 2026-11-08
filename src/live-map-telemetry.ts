@@ -4,6 +4,7 @@ import type {
   MapInstanceState,
   MapPlayerPosition,
   MapSessionEvent,
+  MapTransportPassenger,
   MapTransportPosition,
 } from './types/api';
 
@@ -13,8 +14,15 @@ const TELEMETRY_FIELDS_V3 = 31;
 const TELEMETRY_FIELDS_V4 = 32;
 const TELEMETRY_FIELDS_V6 = 34;
 const TELEMETRY_FIELDS_V7 = 34;
-// entry|name|mapId|instanceId|x|y|z|orientation|pathProgress|displayId.
-const TRANSPORT_FIELDS = 11;
+// WTRN is the magic plus ten fields before version 9, fifteen from it. A
+// 12-field v9 build emitted the standing names as one comma-joined field
+// before the per-rider WTPA records existed; accepted name-only.
+const TRANSPORT_FIELDS_V8 = 11;
+const TRANSPORT_FIELDS_V9_PRE = 12;
+const TRANSPORT_FIELDS = 16;
+// WTPA is the magic plus ten fields (transport GUID, player GUID, name, the
+// transport-local offset and orientation, seat, and the transport clock).
+const TRANSPORT_PASSENGER_FIELDS = 11;
 const BATTLEGROUND_FIELDS = 17;
 const OBJECTIVE_FIELDS = 5;
 const INSTANCE_FIELDS = 4;
@@ -57,13 +65,15 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
   const protocolVersion = versionLines.length > 0
     ? finiteNumber(versionLines[0].slice('WMAP_VERSION|'.length))
     : 1;
-  if (![1, 2, 3, 4, 5, 6, 7, 8].includes(protocolVersion ?? 0)
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(protocolVersion ?? 0)
     || versionLines.some((line) => finiteNumber(line.slice('WMAP_VERSION|'.length)) !== protocolVersion)) {
     return null;
   }
 
   const players: MapPlayerPosition[] = [];
   const transports: MapTransportPosition[] = [];
+  const transportsByGuid = new Map<number, MapTransportPosition>();
+  const pendingTransportPassengers: { transportGuid: number; passenger: MapTransportPassenger }[] = [];
   const battlegrounds: MapBattlegroundState[] = [];
   const instances: MapInstanceState[] = [];
   const deaths: MapInstanceDeath[] = [];
@@ -78,6 +88,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
   let declaredBossCount = 0;
   let declaredDeathCount = 0;
   let declaredEventCount = 0;
+  let declaredTransportPassengerCount = 0;
   let parsedObjectiveCount = 0;
   let parsedBossCount = 0;
 
@@ -86,14 +97,17 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
     if (line.startsWith('WMAP_END|')) {
       const counts = line.split('|').slice(1).map(finiteNumber);
       if (counts.some((value) => value === null)) return null;
-      if (protocolVersion === 8 && counts.length !== 8) return null;
+      // Version 9 added the transport passenger count; a 12-field v9 build
+      // predates it and still sends the eight older counts.
+      if ((protocolVersion ?? 0) >= 9 && counts.length !== 9 && counts.length !== 8) return null;
+      if ((protocolVersion ?? 0) === 8 && counts.length !== 8) return null;
       if ((protocolVersion === 5 || protocolVersion === 6 || protocolVersion === 7) && counts.length !== 7) return null;
       if (protocolVersion === 4 && counts.length !== 6) return null;
       if (protocolVersion === 3 && counts.length !== 3) return null;
       if ((protocolVersion ?? 0) < 3 && counts.length !== 1) return null;
       // v8 inserts the transport count after the player count; older versions
       // have no slot for it.
-      if (protocolVersion === 8) {
+      if ((protocolVersion ?? 0) >= 8) {
         [
           declaredPlayerCount,
           declaredTransportCount,
@@ -103,6 +117,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
           declaredBossCount = 0,
           declaredDeathCount = 0,
           declaredEventCount = 0,
+          declaredTransportPassengerCount = 0,
         ] = counts as number[];
       } else {
         [
@@ -227,22 +242,52 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
       continue;
     }
     if (line.startsWith('WTRN|')) {
-      if (protocolVersion !== 8) return null;
+      if ((protocolVersion ?? 0) < 8) return null;
       const fields = line.split('|');
-      if (fields.length !== TRANSPORT_FIELDS) return null;
+      if (fields.length !== TRANSPORT_FIELDS && fields.length !== TRANSPORT_FIELDS_V9_PRE
+        && fields.length !== TRANSPORT_FIELDS_V8) return null;
       const name = decodeTelemetryField(fields[2]);
-      const values = [...fields.slice(1, 2), ...fields.slice(3, 9), ...fields.slice(9, 11)].map(finiteNumber);
+      const base = [...fields.slice(1, 2), ...fields.slice(3, 9), ...fields.slice(9, 11)].map(finiteNumber);
+      const extra = fields.length === TRANSPORT_FIELDS
+        ? [...fields.slice(11, 16)].map(finiteNumber)
+        : [0, 0, 0, 0, 0];
+      const values = [...base, ...extra];
       if (name === null || values.some((value) => value === null)) return null;
-      const [entry, map, instanceId, position_x, position_y, position_z, orientation, pathProgress, displayId] =
-        values as number[];
-      transports.push({ entry, name, map, instanceId, position_x, position_y, position_z, orientation,
-        pathProgress, displayId });
+      const [entry, map, instanceId, position_x, position_y, position_z, orientation, pathProgress, displayId,
+        guid, period, flags, pathTime, keyFrames] = values as number[];
+      // A 12-field build named its standing players without their offsets.
+      const legacyNames = fields.length === TRANSPORT_FIELDS_V9_PRE
+        ? (decodeTelemetryField(fields[11]) ?? '').split(',').filter(Boolean)
+        : [];
+      const transport: MapTransportPosition = {
+        entry, name, map, instanceId, position_x, position_y, position_z, orientation,
+        pathProgress, displayId, guid, period, flags, pathTime, keyFrames,
+        passengers: legacyNames.map((passenger): MapTransportPassenger => ({
+          guid: 0, name: passenger, x: 0, y: 0, z: 0, orientation: 0, seat: -1, time: 0, time2: 0,
+        })),
+      };
+      transports.push(transport);
+      if (guid) transportsByGuid.set(guid, transport);
+      continue;
+    }
+    if (line.startsWith('WTPA|')) {
+      if ((protocolVersion ?? 0) < 9) return null;
+      const fields = line.split('|');
+      if (fields.length !== TRANSPORT_PASSENGER_FIELDS) return null;
+      const name = decodeTelemetryField(fields[3]);
+      const values = [...fields.slice(1, 3), ...fields.slice(4, 11)].map(finiteNumber);
+      if (name === null || values.some((value) => value === null)) return null;
+      const [transportGuid, guid, x, y, z, orientation, seat, time, time2] = values as number[];
+      pendingTransportPassengers.push({
+        transportGuid,
+        passenger: { guid, name, x, y, z, orientation, seat, time, time2 },
+      });
       continue;
     }
     if (!line.startsWith('WMAP|')) continue;
 
     const fields = line.split('|');
-    const expectedFields = protocolVersion === 7 || protocolVersion === 8
+    const expectedFields = (protocolVersion ?? 0) >= 7
       ? TELEMETRY_FIELDS_V7
       : protocolVersion === 6
         ? TELEMETRY_FIELDS_V6
@@ -314,7 +359,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
       player.wmoGroupId = wmoGroupId;
     }
 
-    if (protocolVersion === 6 || protocolVersion === 7) {
+    if ((protocolVersion ?? 0) >= 6) {
       const gender = finiteNumber(fields[32]);
       const stateFlags = finiteNumber(fields[33]);
       if (gender === null || stateFlags === null) return null;
@@ -324,10 +369,18 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
       player.sapped = (stateFlags & 4) !== 0;
       player.stunned = (stateFlags & 8) !== 0;
       player.spiritForm = (stateFlags & 16) !== 0;
-      if (protocolVersion === 7) player.flagCarrier = (stateFlags & 32) !== 0;
+      if ((protocolVersion ?? 0) >= 7) player.flagCarrier = (stateFlags & 32) !== 0;
     }
 
     players.push(player);
+  }
+
+  // Attach the standing passengers to their transports; a passenger whose
+  // transport record is missing is a malformed snapshot.
+  for (const { transportGuid, passenger } of pendingTransportPassengers) {
+    const transport = transportsByGuid.get(transportGuid);
+    if (!transport) return null;
+    transport.passengers.push(passenger);
   }
 
   if (declaredPlayerCount !== players.length
@@ -337,7 +390,8 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
     || declaredInstanceCount !== instances.length
     || declaredBossCount !== parsedBossCount
     || declaredDeathCount !== deaths.length
-    || declaredEventCount !== events.length) {
+    || declaredEventCount !== events.length
+    || declaredTransportPassengerCount !== pendingTransportPassengers.length) {
     return null;
   }
   return { players, transports, battlegrounds, instances, deaths, events };

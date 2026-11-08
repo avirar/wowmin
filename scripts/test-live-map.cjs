@@ -148,7 +148,7 @@ test('parses protocol v7 battleground flag carrier state', () => {
   assert.equal(snapshot.players[0].flagCarrier, true);
 });
 
-test('parses protocol v8 transport positions', () => {
+test('parses protocol v8/v9 transport positions', () => {
   const playerRow = [
     'WMAP', 'Jaspianus', 571, 0, 100, 200, 30, 1.5, 80, 1, 1, 9001, 1, 1, 1,
     0, 0, 0, 0, 0, 0, 1, 100, 0, 100, 0, 0, '', 0, 0, -1, -1, 1, 31,
@@ -168,6 +168,51 @@ test('parses protocol v8 transport positions', () => {
   assert.equal(transport.orientation, 0.75);
   assert.equal(transport.pathProgress, 3200);
   assert.equal(transport.displayId, 18472);
+  // A v8 record predates the debug fields and the passenger lines.
+  assert.equal(transport.guid, 0);
+  assert.equal(transport.period, 0);
+  assert.equal(transport.flags, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(transport.passengers)), []);
+
+  // A 12-field v9 build (before WTPA) named its riders without offsets; the
+  // record is still accepted, name-only, with the eight older counts.
+  const legacyRow = ['WTRN', 18442, 'Zeppelin', 0, 0, 1, 2, 3, 0.5, 100, 18472, 'Thrall,Jaina'].join('|');
+  const legacy = parseLiveMapTelemetrySnapshot([
+    'WMAP_VERSION|9', playerRow, legacyRow, 'WMAP_END|1|1|0|0|0|0|0|0',
+  ].join('\n'));
+  assert.deepEqual(JSON.parse(JSON.stringify(legacy.transports[0].passengers.map((p) => [p.guid, p.name]))),
+    [[0, 'Thrall'], [0, 'Jaina']]);
+
+  // Version 9 grows WTRN by five fields (object guid, period, flags, path
+  // time, key frames) and gives each standing passenger a WTPA line with
+  // their transport-local offset and the client's transport clock.
+  const v9Row = [
+    'WTRN', 18442, 'Stormwind%7COrgrimmar%20Zeppelin', 0, 0, 1541.77, 5854.94, 3190.0, 0.75, 3200, 18472,
+    77, 120000, 3, 118000, 42,
+  ].join('|');
+  const riderRow = [
+    'WTPA', 77, 4242, 'Thrall', '1.500', '-2.250', '6.099', '4.100', '-1', '1234', '5678',
+  ].join('|');
+  const v9 = parseLiveMapTelemetrySnapshot([
+    'WMAP_VERSION|9', playerRow, v9Row, riderRow, 'WMAP_END|1|1|0|0|0|0|0|0|1',
+  ].join('\n'));
+  const v9Transport = v9.transports[0];
+  assert.equal(v9Transport.guid, 77);
+  assert.equal(v9Transport.period, 120000);
+  assert.equal(v9Transport.flags, 3);
+  assert.equal(v9Transport.pathTime, 118000);
+  assert.equal(v9Transport.keyFrames, 42);
+  assert.deepEqual(JSON.parse(JSON.stringify(v9Transport.passengers)), [
+    { guid: 4242, name: 'Thrall', x: 1.5, y: -2.25, z: 6.099, orientation: 4.1, seat: -1, time: 1234, time2: 5678 },
+  ]);
+  // A rider whose transport record is missing is a malformed snapshot, and
+  // so is a declared passenger count that disagrees.
+  assert.equal(parseLiveMapTelemetrySnapshot([
+    'WMAP_VERSION|9', playerRow, riderRow, 'WMAP_END|1|0|0|0|0|0|0|0|1',
+  ].join('\n')), null);
+  assert.equal(parseLiveMapTelemetrySnapshot([
+    'WMAP_VERSION|9', playerRow, v9Row, riderRow, 'WMAP_END|1|1|0|0|0|0|0|0|0',
+  ].join('\n')), null);
 });
 
 test('rejects v8 snapshots with mismatched transport counts or stray rows', () => {
