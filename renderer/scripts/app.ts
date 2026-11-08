@@ -6613,6 +6613,14 @@ const $instanceBotDecisions = $<HTMLElement>('instance-bot-decisions');
 const $instanceDebugOverlay = $<HTMLElement>('instance-debug-overlay');
 const $instanceSceneNotice = $<HTMLElement>('instance-scene-notice');
 const $instanceSceneNoticeText = $<HTMLElement>('instance-scene-notice-text');
+const $instanceWatchTooltip = $<HTMLElement>('instance-watch-tooltip');
+const $instanceSelectedPanel = $<HTMLElement>('instance-selected-panel');
+const $instanceSelName = $<HTMLElement>('instance-sel-name');
+const $instanceSelDetails = $<HTMLElement>('instance-sel-details');
+const $instanceSelCoords = $<HTMLElement>('instance-sel-coords');
+const $instanceSelActions = $<HTMLElement>('instance-sel-actions');
+const $instanceActionResult = $<HTMLElement>('instance-action-result');
+const $instanceDeselectBtn = $<HTMLButtonElement>('instance-deselect-btn');
 // Maps whose scene notice the viewer has dismissed, until the page reloads.
 const dismissedSceneNotices = new Set<number>();
 const $instanceWatchTitle = $<HTMLElement>('instance-watch-title');
@@ -6716,7 +6724,23 @@ let instanceViewBounds = new Map<string, InstanceCoordinateBounds>();
 const instanceViewTransforms = new Map<string, InstanceViewTransform>();
 const instanceSelectedFloorIds = new Map<string, number>();
 let instanceBaseViewport: InstanceProjectionViewport | null = null;
-let instanceMarkerHitAreas: Array<{ name: string; x: number; y: number; radius: number }> = [];
+// A drawable unit's screen-space hover/click target, rebuilt every frame by the
+// flat render. `details` and `coords` fill the hover tooltip and the selection
+// panel; `isPlayer` marks players, the only kind with the SOAP action panel.
+type InstanceHitArea = {
+  kind: 'player' | 'creature' | 'transport' | 'structure';
+  name: string;
+  x: number;
+  y: number;
+  radius: number;
+  details: string;
+  coords: string;
+  isPlayer: boolean;
+  isBot: boolean;
+};
+let instanceMarkerHitAreas: InstanceHitArea[] = [];
+// The unit the viewer last clicked, shown in the selection panel.
+let instanceSelection: InstanceHitArea | null = null;
 let instancePanStart: { x: number; y: number; panX: number; panY: number; moved: boolean } | null = null;
 const instanceMapAssets = new Map<number, LoadedInstanceMapAsset | null>();
 // Live position stream for the selected session.
@@ -6816,6 +6840,10 @@ let instanceShowCircles = readStoredFlag(INSTANCE_CIRCLES_STORAGE_KEY, true);
 // a model rather than at its feet.
 const INSTANCE_PLAYER_MODEL_HEIGHT = 2.2;
 const INSTANCE_CREATURE_MODEL_HEIGHT = 2.5;
+// A passenger manning a control seat (gunship cannon, mech, ...) is fixed in a
+// small seat rather than walking the vehicle deck; their flat marker draws at
+// this fraction of the normal player icon size.
+const INSTANCE_SEATED_PLAYER_SCALE = 0.58;
 // ?debug in the page URL shows render and stream statistics over the view.
 const instanceDebug = new URLSearchParams(window.location.search).has('debug');
 const INSTANCE_DEBUG_WINDOW_MS = 2000;
@@ -8314,6 +8342,36 @@ function focusInstancePlayer(name: string): void {
   renderInstanceWatcher();
 }
 
+// The unit under a screen point: the nearest hit area whose radius covers the
+// point, preferring players over mobs over transports and structures.
+function findInstanceHitArea(x: number, y: number): InstanceHitArea | null {
+  const rank = (area: InstanceHitArea): number => (area.kind === 'player' ? 0 : area.kind === 'creature' ? 1 : 2);
+  let best: InstanceHitArea | null = null;
+  let bestScore = Infinity;
+  for (const area of instanceMarkerHitAreas) {
+    const distance = Math.hypot(area.x - x, area.y - y);
+    if (distance > area.radius) continue;
+    const score = rank(area) * 10000 + distance;
+    if (score < bestScore) { bestScore = score; best = area; }
+  }
+  return best;
+}
+
+// Shows or hides the selection panel for a clicked unit. Players carry the
+// SOAP action buttons; the other kinds (mobs, transports, structures) are
+// info-only.
+function setInstanceSelection(hit: InstanceHitArea | null): void {
+  instanceSelection = hit;
+  if (!$instanceSelectedPanel) return;
+  if (!hit) { $instanceSelectedPanel.classList.add('hidden'); return; }
+  $instanceSelectedPanel.classList.remove('hidden');
+  if ($instanceSelName) $instanceSelName.textContent = hit.isBot ? `${hit.name} (bot)` : hit.name;
+  if ($instanceSelDetails) $instanceSelDetails.textContent = hit.details;
+  if ($instanceSelCoords) $instanceSelCoords.textContent = hit.coords;
+  if ($instanceSelActions) $instanceSelActions.classList.toggle('hidden', !hit.isPlayer);
+  if ($instanceActionResult) { $instanceActionResult.textContent = ''; $instanceActionResult.className = 'action-result'; }
+}
+
 function updateInstanceTrails(session: ActiveInstanceSession): void {
   const activeNames = new Set(session.players.map((player) => player.name));
   for (const name of instanceTrails.keys()) {
@@ -8600,6 +8658,17 @@ function drawInstanceWatchPublicMap(
       transport.position_z,
     );
     drawTramCarMarker(ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x), scale);
+    instanceMarkerHitAreas.push({
+      kind: 'transport',
+      name: `Tram (entry ${transport.entry})`,
+      x: origin.x,
+      y: origin.y,
+      radius: 8 * scale + 3,
+      details: 'Deeprun Tram car',
+      coords: `(${transport.position_x.toFixed(0)}, ${transport.position_y.toFixed(0)})`,
+      isPlayer: false,
+      isBot: false,
+    });
   }
 }
 
@@ -8677,6 +8746,17 @@ function drawInstanceIcStructures(
     const gateState = breached ? 2 : health !== undefined && health > 0 && health < 100 ? 1 : 0;
     const icon = instanceClientIcons.get('poi');
     if (!icon) continue;
+    instanceMarkerHitAreas.push({
+      kind: 'structure',
+      name: `Gate (entry ${gate.entry})`,
+      x: origin.x,
+      y: origin.y,
+      radius: 10 * scale,
+      details: `${['Intact', 'Damaged', 'Destroyed'][gateState]} • ${gate.faction === 0 ? 'Alliance' : gate.faction === 1 ? 'Horde' : 'Neutral'} keep`,
+      coords: `(${gate.x.toFixed(0)}, ${gate.y.toFixed(0)})`,
+      isPlayer: false,
+      isBot: false,
+    });
     ctx.save();
     ctx.translate(origin.x, origin.y);
     ctx.scale(scale, scale);
@@ -8713,6 +8793,17 @@ function drawInstanceIcStructures(
     const ahead = projection.worldToScreen(ship.x + Math.cos(ship.yaw) * 10, ship.y + Math.sin(ship.yaw) * 10, ship.z);
     drawGunshipMarker(ctx, origin,
       Math.atan2(ahead.y - origin.y, ahead.x - origin.x) + GUNSHIP_HEADING_OFFSET, faction, scale);
+    instanceMarkerHitAreas.push({
+      kind: 'transport',
+      name: `Gunship (entry ${ship.entry})`,
+      x: origin.x,
+      y: origin.y,
+      radius: GUNSHIP_MARKER_SIZE * scale / 2 + 4,
+      details: `${faction === 0 ? 'Alliance' : 'Horde'} airship`,
+      coords: `(${ship.x.toFixed(0)}, ${ship.y.toFixed(0)})`,
+      isPlayer: false,
+      isBot: false,
+    });
   }
 }
 
@@ -8813,6 +8904,18 @@ function drawInstanceVehicleBlips(
       ctx, origin, Math.atan2(ahead.y - origin.y, ahead.x - origin.x), iconKey, scale,
       VEHICLE_BLIP_MARKER_SIZE,
     );
+    const blipEntry = creaturesByGuid.get(vehicle.vehicleGuid)?.entry ?? 0;
+    instanceMarkerHitAreas.push({
+      kind: 'transport',
+      name: blipEntry ? `Vehicle (entry ${blipEntry})` : 'Vehicle',
+      x: origin.x,
+      y: origin.y,
+      radius: VEHICLE_BLIP_MARKER_SIZE * scale / 2 + 3,
+      details: 'Vehicle minimap blip',
+      coords: `(${pose.x.toFixed(0)}, ${pose.y.toFixed(0)})`,
+      isPlayer: false,
+      isBot: false,
+    });
   }
 }
 
@@ -9189,6 +9292,21 @@ function drawInstanceCanvas(followPass: boolean): void {
         }
         drawInstanceCreature(ctx, creature, info, point, markerScale, scenery);
       }
+      // A flat-map hover/click target for every selectable mob; scenery is
+      // decoration the viewer can't act on, so it gets none.
+      if (!scenery) {
+        instanceMarkerHitAreas.push({
+          kind: 'creature',
+          name: info?.name ?? `#${creature.entry}`,
+          x: point.x,
+          y: point.y,
+          radius: 9 * markerScale + 5,
+          details: `Lv${info?.maxLevel ?? '?'} ${creature.alive ? (creature.inCombat ? 'Combat' : 'Alive') : 'Dead'}${creature.hostile ? ' • hostile' : ''}${creature.playerControlled ? ' • player' : ''}`,
+          coords: `(${creature.x.toFixed(0)}, ${creature.y.toFixed(0)})`,
+          isPlayer: false,
+          isBot: false,
+        });
+      }
       if (plateStyle) {
         const extras = live ? getInstancePlateExtras(key, liveNow) : {};
         const marked = marker !== null;
@@ -9251,6 +9369,9 @@ function drawInstanceCanvas(followPass: boolean): void {
     // name over the vehicle.
     const passenger = playerGuid !== null ? instanceLivePassengers.get(playerGuid, liveNow) : null;
     const hiddenPassenger = Boolean(passenger?.hidden);
+    // Fixed in a control seat (cannon, ...): draw a smaller flat marker than a
+    // deck passenger or a player on foot.
+    const seated = Boolean(passenger?.driver);
     const riderTop = !sceneView || playerGuid === null ? null
       : hiddenPassenger && passenger
         ? sceneView.anchor(combatPositions, unitKey(passenger.vehicleGuid, passenger.vehicleCreature), 'overhead')
@@ -9261,14 +9382,14 @@ function drawInstanceCanvas(followPass: boolean): void {
         ? projection.worldToScreen(player.position_x, player.position_y, player.position_z + INSTANCE_PLAYER_MODEL_HEIGHT).y
         : point.y;
     const color = getInstancePlayerColor(player);
-    const markerRadius = (player.isBot ? 6 : 8) * markerScale;
+    const markerRadius = (player.isBot ? 6 : 8) * markerScale * (seated ? INSTANCE_SEATED_PLAYER_SCALE : 1);
     // A model has its own ring on the floor (combat and selection included).
     if (!model && !hiddenPassenger) {
       drawInstanceAuraHalo(ctx, playerGuid !== null ? instanceCombatEffects.tint(unitKey(playerGuid, false), instanceAuraShownAsArt(isoView)) : null, point,
         markerRadius + 7 * markerScale);
       if (player.inCombat) {
         ctx.beginPath();
-        ctx.arc(point.x, point.y, 11 * markerScale, 0, Math.PI * 2);
+        ctx.arc(point.x, point.y, 11 * markerScale * (seated ? INSTANCE_SEATED_PLAYER_SCALE : 1), 0, Math.PI * 2);
         ctx.strokeStyle = '#ef4444';
         ctx.lineWidth = 2;
         ctx.stroke();
@@ -9289,9 +9410,17 @@ function drawInstanceCanvas(followPass: boolean): void {
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-    instanceMarkerHitAreas.push(model
-      ? { name: player.name, x: point.x, y: (point.y + top) / 2, radius: Math.max(markerRadius + 6, (point.y - top) / 2 + 4) }
-      : { name: player.name, x: point.x, y: point.y, radius: markerRadius + 6 });
+    instanceMarkerHitAreas.push({
+      kind: 'player',
+      name: player.name,
+      x: point.x,
+      y: model ? (point.y + top) / 2 : point.y,
+      radius: model ? Math.max(markerRadius + 6, (point.y - top) / 2 + 4) : markerRadius + 6,
+      details: `Lv${player.level || 1} ${RACE_NAMES[player.race] ?? `Race ${player.race}`} ${CLASS_NAMES[player.class] ?? `Class ${player.class}`} • ${player.alive ? (player.inCombat ? 'Combat' : 'Alive') : 'Dead'}`,
+      coords: `(${player.position_x.toFixed(0)}, ${player.position_y.toFixed(0)})`,
+      isPlayer: true,
+      isBot: player.isBot,
+    });
 
     // A model shows which way it faces.
     if (!model && !hiddenPassenger) {
@@ -9748,10 +9877,15 @@ async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
       selectedInstanceKey = activeInstanceSessions[0]?.key ?? null;
       selectedInstancePlayerName = null;
       instanceTrails = new Map();
+      setInstanceSelection(null);
     }
     const selected = getSelectedInstanceSession();
     if (selectedInstancePlayerName && !selected?.players.some((player) => player.name === selectedInstancePlayerName)) {
       selectedInstancePlayerName = null;
+    }
+    const currentSelection = instanceSelection;
+    if (currentSelection?.isPlayer && !selected?.players.some((player) => player.name === currentSelection.name)) {
+      setInstanceSelection(null);
     }
     if (selected) updateInstanceTrails(selected);
     if ($instanceWatchStatus) {
@@ -9792,6 +9926,7 @@ $instanceSessionSelect?.addEventListener('change', () => {
   selectedInstanceKey = $instanceSessionSelect.value || null;
   selectedInstancePlayerName = null;
   instanceTrails = new Map();
+  setInstanceSelection(null);
   const session = getSelectedInstanceSession();
   if (session) updateInstanceTrails(session);
   renderInstanceWatcher();
@@ -9878,14 +10013,79 @@ $instanceWatchCanvas?.addEventListener('pointerup', (event) => {
   const rect = $instanceWatchCanvas.getBoundingClientRect();
   const x = (event.clientX - rect.left) * $instanceWatchCanvas.width / rect.width;
   const y = (event.clientY - rect.top) * $instanceWatchCanvas.height / rect.height;
-  const marker = instanceMarkerHitAreas.find((area) => Math.hypot(area.x - x, area.y - y) <= area.radius);
-  if (marker) focusInstancePlayer(marker.name);
+  const hit = findInstanceHitArea(x, y);
+  if (!hit) { setInstanceSelection(null); return; }
+  // Players keep the camera focus; the others just open the info panel.
+  if (hit.kind === 'player') focusInstancePlayer(hit.name);
+  setInstanceSelection(hit);
 });
 $instanceWatchCanvas?.addEventListener('pointercancel', () => {
   instancePanStart = null;
   instanceOrbitStart = null;
   $instanceWatchCanvas.classList.remove('panning');
 });
+// Hover tooltip over any drawable unit; suppressed while panning or orbiting.
+$instanceWatchCanvas?.addEventListener('pointermove', (event) => {
+  if (!$instanceWatchTooltip || !$instanceWatchCanvas) return;
+  if (instancePanStart || instanceOrbitStart) {
+    $instanceWatchTooltip.classList.add('hidden');
+    return;
+  }
+  const rect = $instanceWatchCanvas.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * $instanceWatchCanvas.width / rect.width;
+  const y = (event.clientY - rect.top) * $instanceWatchCanvas.height / rect.height;
+  const hit = findInstanceHitArea(x, y);
+  if (hit) {
+    $instanceWatchTooltip.innerHTML =
+      `<div class="map-tooltip-name">${escapeHtml(hit.name)}</div>` +
+      `<div>${escapeHtml(hit.details)}</div>` +
+      `<div style="color:var(--text-muted);font-size:11px">${escapeHtml(hit.coords)}</div>` +
+      (hit.isBot ? '<div class="map-tooltip-bot">BOT</div>' : '');
+    const tw = 160;
+    const tx = x + 14 + tw > $instanceWatchCanvas.width ? x - tw - 6 : x + 14;
+    const ty = y - 10 < 0 ? y + 10 : y - 10;
+    $instanceWatchTooltip.style.left = `${tx}px`;
+    $instanceWatchTooltip.style.top = `${ty}px`;
+    $instanceWatchTooltip.classList.remove('hidden');
+    $instanceWatchCanvas.style.cursor = 'pointer';
+  } else {
+    $instanceWatchTooltip.classList.add('hidden');
+    $instanceWatchCanvas.style.cursor = 'grab';
+  }
+});
+$instanceWatchCanvas?.addEventListener('pointerleave', () => {
+  $instanceWatchTooltip?.classList.add('hidden');
+  if ($instanceWatchCanvas) $instanceWatchCanvas.style.cursor = 'grab';
+});
+// Selection panel: the SOAP actions run against the clicked player, as the
+// Live Map's panel does; the other kinds show no actions.
+$instanceSelectedPanel?.addEventListener('click', async (event) => {
+  const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-instance-action]');
+  if (!btn || !instanceSelection || !instanceSelection.isPlayer) return;
+  const action = btn.dataset.instanceAction ?? '';
+  const resultEl = $instanceActionResult;
+  if (!state.connected) {
+    if (resultEl) showResult(resultEl, false, 'SOAP not connected');
+    return;
+  }
+  const n = instanceSelection.name;
+  const cmdMap: Record<string, string> = {
+    'pinfo':       `pinfo ${n}`,
+    'freeze':      `freeze ${n}`,
+    'unfreeze':    `unfreeze ${n}`,
+    'kick':        `kick ${n}`,
+    'ban account': `ban account ${n} 0 Admin action`,
+    'summon':      `summon ${n}`,
+  };
+  const cmd = cmdMap[action];
+  if (!cmd) return;
+  btn.disabled = true;
+  const r = await exec(cmd);
+  btn.disabled = false;
+  if (resultEl) showResult(resultEl, r.success, r.message.substring(0, 100) || '(done)');
+  logActivity(cmd, r.message || '(done)', r.success);
+});
+$instanceDeselectBtn?.addEventListener('click', () => setInstanceSelection(null));
 $instanceWatchCanvas?.addEventListener('keydown', (event) => {
   if (event.altKey || event.ctrlKey || event.metaKey) return;
   const key = event.key.toLowerCase();

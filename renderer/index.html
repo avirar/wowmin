@@ -1334,6 +1334,24 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
             <strong>No active instance or battleground sessions</strong>
             <span>This is expected when nobody is currently inside one.</span>
           </div>
+          <div id="instance-watch-tooltip" class="map-tooltip hidden"></div>
+          <div id="instance-selected-panel" class="map-selected-panel hidden">
+            <div class="map-sel-info">
+              <span id="instance-sel-name" class="map-sel-name"></span>
+              <span id="instance-sel-details" class="map-sel-details"></span>
+              <span id="instance-sel-coords" class="map-sel-coords"></span>
+            </div>
+            <div class="map-sel-actions" id="instance-sel-actions">
+              <button class="btn btn-tiny map-action-btn" data-instance-action="pinfo" title="Full player info">&#8505; Info</button>
+              <button class="btn btn-tiny map-action-btn" data-instance-action="freeze">&#10052; Freeze</button>
+              <button class="btn btn-tiny map-action-btn" data-instance-action="unfreeze">&#128275; Unfreeze</button>
+              <button class="btn btn-tiny map-action-btn" data-instance-action="summon">&#128205; Summon</button>
+              <button class="btn btn-tiny map-action-btn" data-instance-action="kick">&#128082; Kick</button>
+              <button class="btn btn-tiny map-action-btn btn-danger-action" data-instance-action="ban account">&#128683; Ban</button>
+            </div>
+            <span id="instance-action-result" class="action-result" style="font-size:11px;flex-shrink:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px"></span>
+            <button id="instance-deselect-btn" class="btn btn-tiny" title="Deselect">&times;</button>
+          </div>
         </div>
         <div class="map-statusbar">
           <span id="instance-watch-status">Waiting for live world telemetry</span>

@@ -3936,6 +3936,10 @@ tbody tr:hover { background: var(--tint-accent-05); }
 #instance-watch-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .instance-watch-scene { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 .instance-watch-scene[hidden] { display: none; }
+/* The reused map-selected-panel sits lower (bottom: 30px) in the map tab where
+   a statusbar is below the canvas; the instance wrapper has no such bar, so
+   seat its copy flush to the bottom. */
+#instance-selected-panel { bottom: 8px; }
 .instance-view-controls.hidden { display: none; }
 .instance-compass {
   position: absolute;
