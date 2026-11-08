@@ -7255,7 +7255,9 @@ function getActiveInstanceArt(mapId: number): ActiveInstanceArt | null {
 // dungeon floors).
 function instanceArtSourceLabel(art: ActiveInstanceArt): string {
   if (art.source?.includes('terrain')) return 'terrain + quads';
-  return art.source?.includes('quads') ? 'quads' : 'paper';
+  if (art.source?.includes('quads')) return 'quads';
+  if (art.projection?.type === 'minimapTiles') return 'minimap tiles';
+  return 'paper';
 }
 
 // The artwork toggle's label: Paper for the hand-drawn art (the zone map
