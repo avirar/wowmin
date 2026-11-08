@@ -5462,6 +5462,14 @@ interface MapOverlayHit {
 }
 let mapOverlayHits: MapOverlayHit[] = [];
 let mapSelectedOverlayKey: string | null = null;
+// The previous capture sliders, for telling which side is pushing.
+const mapCapturePointLastSlider = new Map<number, number>();
+// Hellfire Peninsula's tower flags: WORLD_STATE_OPVP_HP_*_A/H/N.
+const HP_TOWER_OWNERS = new Map<number, 'alliance' | 'horde' | 'neutral'>([
+  [2471, 'alliance'], [2480, 'alliance'], [2483, 'alliance'],
+  [2470, 'horde'], [2481, 'horde'], [2484, 'horde'],
+  [2472, 'neutral'], [2482, 'neutral'], [2485, 'neutral'],
+]);
 let mapSelectedBotWaypoint: MapBotWaypoint | null = null;
 let mapSelectedBotWaypointLoading = false;
 let mapSelectedBotWaypointRequestToken = 0;
@@ -5944,10 +5952,15 @@ async function refreshMapPositions(): Promise<void> {
           ? ` • Wintergrasp ${wintergrasp.active ? 'war' : 'peace'} `
             + `${Math.floor(wintergraspSeconds / 60)}:${String(wintergraspSeconds % 60).padStart(2, '0')}`
           : '';
+        // Hellfire's tower score, so the objective is readable at a glance.
+        const outdoorValues = new Map((snapshot.worldPvp?.states ?? []).map((entry) => [entry.id, entry.value]));
+        const hellfireLabel = state.mapSelectedContinent === 530
+          ? ` • Hellfire towers A ${outdoorValues.get(2476) ?? 0}/3 • H ${outdoorValues.get(2478) ?? 0}/3`
+          : '';
         $mapStatusText.textContent =
           `${source} • ${mapMovingPlayers.size} moving` +
           (transportCount > 0 ? ` • ${transportCount} transports` : '') +
-          wintergraspLabel +
+          wintergraspLabel + hellfireLabel +
           ` • ${new Date(snapshot.capturedAt).toLocaleTimeString()}`;
       }
     } catch {
@@ -8957,6 +8970,30 @@ function drawTramCarMarker(
   ctx.restore();
 }
 
+// The capture bar the client draws while an objective is contested: horde
+// red on the left, alliance blue on the right, a marker at the phase.
+function drawMapCaptureBar(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  phase: number,
+): void {
+  const left = x - width / 2;
+  ctx.save();
+  ctx.fillStyle = 'rgba(8, 16, 26, 0.85)';
+  ctx.fillRect(left - 1, y - 1, width + 2, height + 2);
+  ctx.fillStyle = '#c0392b';
+  ctx.fillRect(left, y, width / 2, height);
+  ctx.fillStyle = '#2f6fd0';
+  ctx.fillRect(left + width / 2, y, width / 2, height);
+  const markerX = left + (width * phase) / 100;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(markerX - 1, y - 2, 2, height + 4);
+  ctx.restore();
+}
+
 // The Live Map's world PvP overlay: the client's own POI icons for the map's
 // outdoor capture points (Wintergrasp's workshops, towers, and walls,
 // Hellfire's towers, the Plaguelands' and other zones' points), selected by
@@ -8997,10 +9034,14 @@ function drawMapWorldPvp(
     : '';
   // Wintergrasp's world-state values carry the owner (the core's
   // BATTLEFIELD_WG_OBJECTSTATE_*: 1 neutral, 4 horde, 7 alliance).
+  // Hellfire's zone-wide tower counts (WORLD_STATE_OPVP_HP_UI_TOWER_COUNT_*).
+  const hpTowerCounts = `Towers A ${values.get(2476) ?? 0}/3 • H ${values.get(2478) ?? 0}/3`;
   const ownerLabel = (poi: MapWorldPoi, value: number): string => {
     if (poi.map === 571 && poi.worldState >= 3698 && poi.worldState <= 3773) {
       return value === 4 ? 'Horde' : value === 7 ? 'Alliance' : value === 1 ? 'Neutral' : `State ${value}`;
     }
+    const hpOwner = HP_TOWER_OWNERS.get(poi.worldState);
+    if (hpOwner) return hpOwner === 'alliance' ? 'Alliance' : hpOwner === 'horde' ? 'Horde' : 'Neutral';
     return value === 1 ? 'Active' : `State ${value}`;
   };
 
@@ -9020,10 +9061,34 @@ function drawMapWorldPvp(
       ctx.drawImage(icon, sourceX, sourceY, cell, cell,
         point.x - size / 2, point.y - size / 2, size, size);
       const structure = structureAt(poi.map, poi.x, poi.y);
+      // A capture point at this POI: its live slider is the capture phase
+      // (0 horde .. 100 alliance, 50 neutral); the client draws the same
+      // bar for players standing in the objective.
+      const capture = world.capturePoints.find((entry) => entry.map === poi.map
+        && Math.hypot(entry.x - poi.x, entry.y - poi.y) < 80) ?? null;
+      let captureLabel = '';
+      if (capture && capture.maxValue > 0) {
+        const phase = clamp(Math.ceil(((capture.slider + capture.maxValue) / (2 * capture.maxValue)) * 100), 0, 100);
+        const previous = mapCapturePointLastSlider.get(capture.entry);
+        mapCapturePointLastSlider.set(capture.entry, capture.slider);
+        const owner = HP_TOWER_OWNERS.get(poi.worldState);
+        // A tower at rest sits at an end (owned) or the middle (neutral);
+        // anything else is a capture in progress.
+        const contested = !(phase === 100 || phase === 0 || (phase === 50 && capture.slider === 0));
+        const pushing = previous === undefined || previous === capture.slider
+          ? (owner === 'horde' ? 'Alliance' : owner === 'alliance' ? 'Horde' : 'Contested')
+          : capture.slider > previous ? 'Alliance' : 'Horde';
+        captureLabel = contested ? `Capturing ${phase}% (${pushing})` : `Capture ${phase}%`;
+        // The client's bar stays visible: horde left, alliance right, the
+        // marker at the phase.
+        drawMapCaptureBar(ctx, point.x, point.y + size / 2 + 2 * markerScale, 26 * markerScale, 4 * markerScale, phase);
+      }
       mapOverlayHits.push({
         key: `poi:${poi.id}`,
         name: poi.name,
-        details: [ownerLabel(poi, value), structure ? `HP ${healthLabel(structure.health, structure.maxHealth)}` : '']
+        details: [ownerLabel(poi, value), captureLabel,
+          HP_TOWER_OWNERS.has(poi.worldState) ? hpTowerCounts : '',
+          structure ? `HP ${healthLabel(structure.health, structure.maxHealth)}` : '']
           .filter(Boolean).join(' • '),
         coords: `(${poi.x.toFixed(0)}, ${poi.y.toFixed(0)}, ${poi.z.toFixed(0)})`,
         x: point.x,

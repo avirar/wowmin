@@ -251,6 +251,24 @@ test('parses the v10 outdoor PvP state, Wintergrasp status, structures, and vehi
   assert.equal(parseLiveMapTelemetrySnapshot(message.replace('WMAP_VERSION|10', 'WMAP_VERSION|9')), null);
 });
 
+test('parses the v11 capture point sliders', () => {
+  const message = [
+    'WMAP_VERSION|11',
+    'WCPT|530|3483|182174|-184.889|3476.930|38.205|12.500|100.000',
+    'WMAP_END|0|0|0|0|0|0|0|0|0|0|0|0|1',
+  ].join('\n');
+  const snapshot = parseLiveMapTelemetrySnapshot(message);
+  assert.ok(snapshot);
+  const [capture] = snapshot.worldPvp.capturePoints;
+  assert.equal(capture.map, 530);
+  assert.equal(capture.zone, 3483);
+  assert.equal(capture.entry, 182174);
+  assert.equal(capture.slider, 12.5);
+  assert.equal(capture.maxValue, 100);
+  // A v10 snapshot carrying WCPT is malformed.
+  assert.equal(parseLiveMapTelemetrySnapshot(message.replace('WMAP_VERSION|11', 'WMAP_VERSION|10')), null);
+});
+
 test('rejects truncated snapshots', () => {
   const message = 'WMAP|Jaspianus|571|0|1|2|3|4|80|1|1|9001|1|1|0\nWMAP_END|2';
   assert.equal(parseLiveMapTelemetry(message), null);

@@ -1150,7 +1150,7 @@ apiRouter.handle('map:getPlayerPositions', async (_event, mapId?: number, instan
     instances: [],
     deaths: [],
     events: [],
-    worldPvp: { states: [], wintergrasp: null, structures: [], vehicles: [] },
+    worldPvp: { states: [], capturePoints: [], wintergrasp: null, structures: [], vehicles: [] },
     source: 'database',
     capturedAt: Date.now(),
   };

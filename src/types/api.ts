@@ -694,10 +694,24 @@ export interface MapWintergraspVehicle {
   maxHealth: number;
 }
 
+// An outdoor PvP capture point (Hellfire's towers, the Plaguelands', ...):
+// its live slider is the capture phase the client's bar shows.
+export interface MapCapturePoint {
+  map: number;
+  zone: number;
+  entry: number;
+  x: number;
+  y: number;
+  z: number;
+  slider: number;
+  maxValue: number;
+}
+
 // The outdoor PvP state the Live Map overlays: world states that select the
 // client's POI icons, plus Wintergrasp's battlefield and its objects.
 export interface MapWorldPvpState {
   states: MapWorldStateValue[];
+  capturePoints: MapCapturePoint[];
   wintergrasp: MapWintergraspStatus | null;
   structures: MapWintergraspStructure[];
   vehicles: MapWintergraspVehicle[];
